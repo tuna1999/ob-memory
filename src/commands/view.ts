@@ -1,6 +1,7 @@
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { fullProjection, visibleProjection } from "../ledger/fold";
 import { renderMemory } from "../ledger/render";
+import { redactText } from "../security/redact";
 import type { SessionRuntime } from "../runtime";
 
 async function present(ctx: ExtensionContext, text: string): Promise<void> {
@@ -37,5 +38,6 @@ export async function handleView(runtime: SessionRuntime, ctx: ExtensionContext,
 	const header =
 		`${scope}: ${projection.observations.length} active observations, ${projection.reflections.length} reflections` +
 		(projection.droppedObservationIds.length > 0 ? `, ${projection.droppedObservationIds.length} dropped ids` : "");
-	await present(ctx, `${header}\n\n${rendered.text || "(no memory records yet)"}`);
+	const text = `${header}\n\n${rendered.text || "(no memory records yet)"}`;
+	await present(ctx, runtime.config.redactSecrets ? redactText(text) : text);
 }

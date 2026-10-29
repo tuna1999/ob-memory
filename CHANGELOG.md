@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.1
+
+- Redaction now recognizes unquoted `Authorization`/`Proxy-Authorization`/`X-Auth-Token` headers with `Bearer`, `Basic`, `Digest`, or `Token` schemes, and runs header/token patterns before assignment redaction.
+- Observer output truncated by `stopReason: "length"` is treated as partial coverage, so the watermark only advances through cited source ids.
+- `consolidateWhenIdle: false` now actually permits `turn_end` scheduling while the agent is busy.
+- `reflectAfterTokens` is clamped to `observationsPoolMaxTokens`; agent turns, worker memory/chunk budgets, and catch-up work gain upper limits.
+- Catch-up enforces its wall-clock budget on in-flight worker calls and does not apply failure backoff when the compaction signal cancels work.
+- `visibleProjection` no longer presents an older memory compaction after a newer native compaction.
+- `/ob-memory config` reports derived effective budgets and active models; `/ob-memory view` redacts rendered output.
+- Docs: corrected development load command, native compaction injection limits, dropper safety, notifications, worker prompt contents, and AGENTS lifecycle claims.
+
 ## 0.3.0
 
 - `observerChunkMaxTokens` and `workerMemoryMaxTokens` are now optional and default to 20% / 25% of the resolved memory model context window (minimum 256; `12000` / `16000` when the window is unknown). Explicit values still win, and a smaller `fallbackModel` window caps both budgets.

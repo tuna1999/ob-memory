@@ -171,18 +171,28 @@ export function fullProjection(entries: readonly LedgerEntry[], upToEntryId?: st
 	return project(entries, boundary, boundary, boundary);
 }
 
-export function latestCompactionDetails(entries: readonly LedgerEntry[]): MemoryDetails | undefined {
+function latestCompactionIndex(entries: readonly LedgerEntry[]): number {
 	for (let i = entries.length - 1; i >= 0; i--) {
-		const entry = entries[i];
-		if (!entry || entry.type !== "compaction") continue;
-		if (isMemoryDetails(entry.details)) return entry.details;
+		if (entries[i]?.type === "compaction") return i;
 	}
-	return undefined;
+	return -1;
+}
+
+/** Details of the latest compaction only, and only when ob-memory supplied it. */
+export function latestCompactionDetails(entries: readonly LedgerEntry[]): MemoryDetails | undefined {
+	const index = latestCompactionIndex(entries);
+	if (index < 0) return undefined;
+	const details = entries[index]?.details;
+	return isMemoryDetails(details) ? details : undefined;
 }
 
 export function visibleProjection(entries: readonly LedgerEntry[]): Projection {
+	// A newer native compaction replaces the visible memory context. Showing an
+	// older ob-memory compaction would label records as visible when the model
+	// can no longer see them.
+	if (latestCompactionIndex(entries) < 0) return fullProjection(entries);
 	const details = latestCompactionDetails(entries);
-	if (!details) return fullProjection(entries);
+	if (!details) return { observations: [], reflections: [], droppedObservationIds: [] };
 	return {
 		observations: details.observations.filter((observation) => !details.droppedObservationIds.includes(observation.id)),
 		reflections: details.reflections,

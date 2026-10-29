@@ -27,6 +27,20 @@ describe("redaction", () => {
 		expect(redacted).toContain("REDACTED");
 	});
 
+	test("redacts unquoted authorization headers", () => {
+		const text = [
+			"Authorization: Basic dXNlcjpwYXNzd29yZA==",
+			"Proxy-Authorization: Basic dXNlcjpwYXNz",
+			"Authorization: Bearer abcdefghijklmnop",
+			"X-Auth-Token: Bearer zyxwvutsrqponmlk",
+		].join("\n");
+		const redacted = redactText(text);
+		expect(redacted).not.toContain("dXNlcjpwYXNz");
+		expect(redacted).not.toContain("abcdefghijklmnop");
+		expect(redacted).not.toContain("zyxwvutsrqponmlk");
+		expect(redacted).toContain("REDACTED AUTHORIZATION HEADER");
+	});
+
 	test("redacts sensitive object keys but keeps token counts", () => {
 		const value = redactValue({
 			apiKey: "secret",

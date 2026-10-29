@@ -109,6 +109,16 @@ describe("ledger fold and projections", () => {
 		const visible = visibleProjection([...entries, compacted]);
 		expect(visible.observations).toHaveLength(1);
 		expect(visible.reflections).toHaveLength(1);
+
+		const native: LedgerEntry = {
+			type: "compaction",
+			id: "e6",
+			firstKeptEntryId: "e2",
+			details: { readFiles: [] },
+		};
+		const afterNative = visibleProjection([...entries, compacted, native]);
+		expect(afterNative.observations).toHaveLength(0);
+		expect(afterNative.reflections).toHaveLength(0);
 	});
 
 	test("dangling coverage is not applied to a projection", () => {

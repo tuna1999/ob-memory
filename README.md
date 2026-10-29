@@ -8,7 +8,7 @@ No vector database. No per-turn retrieval. No second copy of the transcript. Tes
 
 - **Observer** distills unobserved conversation chunks into timestamped, relevance-rated observations. Every observation cites the exact source entry ids that support it.
 - **Reflector** crystallizes stable, durable facts from active observations into reflections.
-- **Dropper** retires only observations whose meaning is safely captured elsewhere. Critical records are never drop candidates; drops are ledger tombstones, not history deletion.
+- **Dropper** retires observations when the pool exceeds its budget. Low/medium relevance records may be dropped without reflection coverage; high relevance needs reflection coverage, and critical records are never drop candidates. Drops are ledger tombstones, not history deletion.
 - **Compaction ownership** replaces omp's native summary with a deterministic memory render when the ledger covers the summarized range. If the observer has not covered the cut, the plugin retains the unobserved tail or delegates to native compaction.
 - **`ob_recall`** recovers one exact observation/reflection id plus its source evidence. It is a provenance tool, not semantic search.
 - **`/ob-memory`** exposes view, status, config, passive mode, and a manual consolidation pass.
@@ -58,8 +58,12 @@ omp plugin install "$PWD"
 Or load a checkout directly without installing it:
 
 ```bash
-omp -e ./src/index.ts
+omp --no-extensions -e ./src/index.ts
 ```
+
+`--no-extensions` prevents an installed copy from loading alongside the
+checkout; explicit `-e` paths still load. Without it, both copies register
+handlers and can append duplicate ledger entries.
 
 Development checks:
 
@@ -98,7 +102,7 @@ Without `model`, memory workers use the active session model. A configured `fall
 
 | Command | Purpose |
 |---|---|
-| `/ob-memory view` | Visible memory from the latest memory compaction (or the full ledger if none) |
+| `/ob-memory view` | Visible memory from the latest compaction when it was memory-owned; empty after a newer native compaction; full ledger if no compaction exists |
 | `/ob-memory view full` | Full active ledger on the current branch |
 | `/ob-memory status` | Counts, coverage watermarks, pressure, drift, last run/error |
 | `/ob-memory observe-now` | Run one consolidation pass immediately |
@@ -127,7 +131,7 @@ If the observer is behind the proposed cut, the plugin first tries a bounded syn
 - moves the cut back to retain the unobserved tail, subject to `compactionMaxRetainedTokens`, or
 - delegates to omp's native summarizer.
 
-Native compaction is never silently starved of context. When delegating, `session.compacting` injects the rendered ledger as extra summary context and records `preserveData["ob-memory"]`. The host skips `session.compacting` when a custom result was supplied, so the two paths cannot duplicate memory in one pass. Focused `/compact <instructions>` deliberately delegates so the native summarizer can honor the user's focus while still receiving the memory context.
+When delegating, `session.compacting` supplies the rendered ledger as extra summary context and records `preserveData["ob-memory"]`. This hook is advisory: native methods that consume summarizer context (for example `soft`) generally use it, while deterministic methods such as `snapcompact` and `handoff` may not embed it in the final summary. The host skips `session.compacting` when a custom result was supplied, so the two paths cannot duplicate memory in one pass. Focused `/compact <instructions>` deliberately delegates so the native summarizer can honor the user's focus while still receiving the memory context. If memory must be authoritative in the retained context, keep compaction ownership enabled and coverage current.
 
 ## Privacy
 
@@ -149,11 +153,13 @@ bun run bench
 The benchmark folds 10,000 journal entries, renders summaries, chunks a 12k-token source window, and runs 100 compaction projections. Representative result on the development host:
 
 ```text
-foldLedger (tip)                       1.481 ms/op
-fullProjection (tip)                   1.660 ms/op
-renderMemory (4k budget)               0.503 ms/op
-chunkUnobserved (12k budget)           1.988 ms/op
-compactionProjection x100              1.082 ms/op
+entries=10000 compactions=100
+foldLedger (tip)                       1.057 ms/op
+fullProjection (tip)                   1.751 ms/op
+renderMemory (all records)             0.720 ms/op
+renderMemory (4k budget)               0.416 ms/op
+chunkUnobserved (12k budget)           2.065 ms/op
+compactionProjection x100              1.062 ms/op
 ```
 
 ## Scope

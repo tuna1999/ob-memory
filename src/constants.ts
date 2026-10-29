@@ -1,5 +1,5 @@
 export const EXTENSION_NAME = "ob-memory";
-export const EXTENSION_VERSION = "0.3.0";
+export const EXTENSION_VERSION = "0.3.1";
 
 export const OM_OBSERVATIONS_RECORDED = "ob-memory.observations.recorded";
 export const OM_REFLECTIONS_RECORDED = "ob-memory.reflections.recorded";

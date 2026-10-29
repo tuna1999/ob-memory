@@ -59,6 +59,8 @@ export interface WorkerLoopResult {
 	turns: number;
 	/** The model still had tool calls when maxTurns stopped the loop. */
 	exhausted: boolean;
+	/** At least one assistant response ended with `stopReason: "length"`. */
+	truncated: boolean;
 }
 
 function assistantText(message: AssistantMessage): string {
@@ -92,6 +94,7 @@ export async function runWorkerLoop(options: WorkerLoopOptions): Promise<WorkerL
 	let finalText = "";
 	let turns = 0;
 	let exhausted = false;
+	let truncated = false;
 	const maxTurns = Math.max(1, options.maxTurns);
 
 	for (let turn = 0; turn < maxTurns; turn++) {
@@ -111,6 +114,7 @@ export async function runWorkerLoop(options: WorkerLoopOptions): Promise<WorkerL
 			},
 		);
 		stopReason = assistant.stopReason;
+		if (assistant.stopReason === "length") truncated = true;
 		finalText = assistantText(assistant);
 		usage.push(assistant.usage);
 		options.onUsage?.(assistant.usage, assistant);
@@ -157,5 +161,5 @@ export async function runWorkerLoop(options: WorkerLoopOptions): Promise<WorkerL
 		if (turn + 1 >= maxTurns) exhausted = true;
 	}
 
-	return { records, toolCallCount, usage, stopReason, finalText, turns, exhausted };
+	return { records, toolCallCount, usage, stopReason, finalText, turns, exhausted, truncated };
 }

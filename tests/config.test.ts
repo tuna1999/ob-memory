@@ -55,6 +55,43 @@ describe("config", () => {
 		expect(warnings.length).toBeGreaterThanOrEqual(3);
 	});
 
+	test("clamps reflectAfterTokens to the observation pool max", () => {
+		const cwd = tempDir();
+		const agentDir = tempDir();
+		writeFileSync(
+			join(agentDir, "ob-memory.json"),
+			JSON.stringify({ reflectAfterTokens: 20_000, observationsPoolMaxTokens: 1_000 }),
+		);
+		const warnings: string[] = [];
+		const loaded = loadConfig({ cwd, agentDir, env: {}, warn: (message) => warnings.push(message) });
+		expect(loaded.config.reflectAfterTokens).toBe(1_000);
+		expect(loaded.config.observationsPoolTargetTokens).toBe(1_000);
+		expect(warnings.some((warning) => warning.includes("reflectAfterTokens"))).toBe(true);
+	});
+
+	test("clamps resource limits", () => {
+		const cwd = tempDir();
+		const agentDir = tempDir();
+		writeFileSync(
+			join(agentDir, "ob-memory.json"),
+			JSON.stringify({
+				agentMaxTurns: 1_000,
+				observerChunkMaxTokens: 9_000_000,
+				workerMemoryMaxTokens: 8_000_000,
+				compactionCatchUpBudgetMs: 999_999,
+				compactionCatchUpMaxChunks: 99,
+			}),
+		);
+		const warnings: string[] = [];
+		const loaded = loadConfig({ cwd, agentDir, env: {}, warn: (message) => warnings.push(message) });
+		expect(loaded.config.agentMaxTurns).toBe(32);
+		expect(loaded.config.observerChunkMaxTokens).toBe(1_000_000);
+		expect(loaded.config.workerMemoryMaxTokens).toBe(1_000_000);
+		expect(loaded.config.compactionCatchUpBudgetMs).toBe(25_000);
+		expect(loaded.config.compactionCatchUpMaxChunks).toBe(8);
+		expect(warnings.filter((warning) => warning.includes("clamped"))).toHaveLength(5);
+	});
+
 	test("parses model choices from JSON and env", () => {
 		const cwd = tempDir();
 		const agentDir = tempDir();

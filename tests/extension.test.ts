@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -15,6 +15,47 @@ afterEach(() => {
 });
 
 describe("extension factory", () => {
+	test("schedules turn_end consolidation when consolidateWhenIdle is false", async () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "ob-memory-agent-"));
+		const cwd = mkdtempSync(join(tmpdir(), "ob-memory-cwd-"));
+		dirs.push(agentDir, cwd);
+		mkdirSync(join(cwd, ".omp"), { recursive: true });
+		writeFileSync(join(cwd, ".omp", "ob-memory.json"), JSON.stringify({ consolidateWhenIdle: false }));
+		process.env.PI_CODING_AGENT_DIR = agentDir;
+
+		const handlers = new Map<string, (event: never, ctx: ExtensionContext) => unknown>();
+		const pi = {
+			setLabel() {},
+			on(event: string, handler: (event: never, ctx: ExtensionContext) => unknown) {
+				handlers.set(event, handler);
+			},
+			registerTool() {},
+			registerCommand() {},
+			appendEntry() {},
+			logger: { info() {}, warn() {}, error() {} },
+			zod: piZod,
+		} as unknown as ExtensionAPI;
+		obMemory(pi);
+
+		const harness = makeHarness();
+		harness.ctx.cwd = cwd;
+		const ctx = harness.ctx as ExtensionContext & { isIdle: () => boolean };
+		const timers: number[] = [];
+		Object.assign(ctx, {
+			isIdle: () => false,
+			setTimeout: (_fn: () => void, delay: number) => {
+				timers.push(delay);
+				return timers.length as never;
+			},
+			clearTimer: () => {},
+		});
+		await handlers.get("session_start")?.({ type: "session_start" } as never, ctx);
+		expect(timers).toEqual([1_000]);
+		handlers.get("turn_end")?.({ type: "turn_end" } as never, ctx);
+		expect(timers).toEqual([1_000, 300]);
+		handlers.get("session_shutdown")?.({ type: "session_shutdown" } as never, ctx);
+	});
+
 	test("registers tools/commands and binds a main session", async () => {
 		const agentDir = mkdtempSync(join(tmpdir(), "ob-memory-agent-"));
 		dirs.push(agentDir);

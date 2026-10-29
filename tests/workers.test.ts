@@ -196,6 +196,40 @@ describe("observer turn budget", () => {
 		const record = entries.find((entry) => entry.customType === "ob-memory.observations.recorded");
 		expect((record?.data as { coversUpToId?: string } | undefined)?.coversUpToId).toBe("e1");
 	});
+
+	test("does not claim coverage past cited ids when output hits the length limit", async () => {
+		const { runtime, entries } = makeHarness({ agentMaxTurns: 3, redactSecrets: false });
+		entries.push(messageEntry("e1", "user", "first source"), messageEntry("e2", "assistant", "second source"));
+		const chunk = chunkUnobservedEntries(entries, undefined, 10_000);
+		expect(chunk).toBeDefined();
+		const truncated = makeAssistant(
+			[
+				makeToolCall("record_observations", {
+					observations: [
+						{
+							timestamp: "2026-10-29 10:00",
+							content: "User supplied the first source.",
+							relevance: "high",
+							sourceEntryIds: ["e1"],
+						},
+					],
+				}),
+			],
+			"length",
+		);
+		const done = makeAssistant([text("done")], "stop");
+		const records = await observeChunk(
+			runtime,
+			entries,
+			resolved,
+			chunk!,
+			new AbortController().signal,
+			scriptedComplete([truncated, done]),
+		);
+		expect(records).toHaveLength(1);
+		const record = entries.find((entry) => entry.customType === "ob-memory.observations.recorded");
+		expect((record?.data as { coversUpToId?: string } | undefined)?.coversUpToId).toBe("e1");
+	});
 });
 
 describe("reflector", () => {

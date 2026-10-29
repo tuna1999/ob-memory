@@ -222,11 +222,13 @@ ${chunk}`;
 		},
 	});
 	for (const item of usage) runtime.debug.usage("observer", resolved.label, item);
-	if (result.exhausted) {
+	if (result.exhausted || result.truncated) {
 		options.onExhausted?.();
 		runtime.debug.record("observer", "turn_budget_exhausted", {
 			turns: result.turns,
 			toolCalls: result.toolCallCount,
+			exhausted: result.exhausted,
+			truncated: result.truncated,
 		});
 	}
 	const values = Array.from(accepted.values());

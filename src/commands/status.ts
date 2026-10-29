@@ -13,7 +13,12 @@ import {
 } from "../ledger/fold";
 import { estimateEntryTokens } from "../ledger/serialize";
 import { realTokensSinceObservationCoverage } from "../ledger/usage";
-import { publicConfig } from "../config";
+import {
+	publicConfig,
+	resolveObserverChunkMaxTokens,
+	resolveWorkerMemoryMaxTokens,
+} from "../config";
+import { compactionRetainedBudget, compactionSummaryBudget } from "../hooks/policy";
 import { redactText } from "../security/redact";
 import type { SessionRuntime } from "../runtime";
 
@@ -76,9 +81,26 @@ export function handleStatus(runtime: SessionRuntime, ctx: ExtensionContext): vo
 	present(ctx, runtime.config.redactSecrets ? redactText(text) : text);
 }
 
+export function effectiveConfig(runtime: SessionRuntime): Record<string, unknown> {
+	const configured = runtime.config.model;
+	const worker = (configured
+		? runtime.ctx.models.resolve(`${configured.provider}/${configured.id}`)
+		: runtime.ctx.model) ?? runtime.ctx.model;
+	return {
+		...publicConfig(runtime.config),
+		sessionModel: runtime.activeModelLabel,
+		workerModel: runtime.modelLabel,
+		workerModelChoice: configured ?? null,
+		observerChunkMaxTokens: resolveObserverChunkMaxTokens(runtime.config, worker?.contextWindow),
+		workerMemoryMaxTokens: resolveWorkerMemoryMaxTokens(runtime.config, worker?.contextWindow),
+		compactionSummaryMaxTokens: compactionSummaryBudget(runtime),
+		compactionMaxRetainedTokens: compactionRetainedBudget(runtime),
+	};
+}
+
 export function handleConfig(runtime: SessionRuntime, ctx: ExtensionContext): void {
 	runtime.updateContext(ctx);
-	present(ctx, `Observational Memory config\n${JSON.stringify(publicConfig(runtime.config), null, 2)}`);
+	present(ctx, `Observational Memory config\n${JSON.stringify(effectiveConfig(runtime), null, 2)}`);
 }
 
 export function handleHelp(runtime: SessionRuntime, ctx: ExtensionContext): void {

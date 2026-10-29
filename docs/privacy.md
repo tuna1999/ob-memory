@@ -8,10 +8,10 @@ Only worker model requests:
 
 - the worker system prompt;
 - bounded prior memory (reflections and active observations);
-- one bounded source chunk with source entry ids and message/tool output text;
+- one bounded source chunk with source entry ids, message/tool output text, tool-call arguments, thinking blocks (where the host persisted them), and other extensions' `custom_message` content;
 - model/thinking configuration required by the provider.
 
-The active session's main model already receives the conversation. Worker requests are separate calls to the model configured by `model` or the session model.
+The active session's main model already receives the conversation. Worker requests are separate calls to the model configured by `model` or the session model. Source text is untrusted data, not instructions; the worker only has a constrained record tool and validates all proposed source ids locally.
 
 ## Redaction
 
@@ -21,7 +21,8 @@ With `redactSecrets: true` (default), the plugin applies best-effort pattern red
 - stored observation and reflection content;
 - compaction summaries and fallback context;
 - `ob_recall` output;
-- `/ob-memory status` output and automatic notifications;
+- `/ob-memory view` and `/ob-memory status` output;
+- automatic notifications;
 - debug log fields.
 
 Patterns cover common API keys, bearer tokens, private-key blocks, AWS access keys and `AWS_SECRET_ACCESS_KEY`-style assignments, cloud/vendor token prefixes (Stripe, GitHub, GitLab, PyPI, npm, Hugging Face, Google, Slack), and `password`/`secret`/`token` assignments. Object keys such as `apiKey`, `AWS_SECRET_ACCESS_KEY`, `refreshToken`, `authorization`, and `credential` are replaced wholesale in debug structures, while numeric fields such as `tokenCount` are preserved.

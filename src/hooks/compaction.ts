@@ -48,9 +48,18 @@ async function catchUp(
 	let currentEntries = entries;
 	let currentCoverageId = coverageId;
 	const deadline = Date.now() + runtime.config.compactionCatchUpBudgetMs;
+	if (runtime.config.compactionCatchUpBudgetMs <= 0) {
+		return {
+			chunks,
+			entries: currentEntries,
+			coverageIndex: latestCoverageIndex(currentEntries, OM_OBSERVATIONS_RECORDED),
+		};
+	}
 	const ran = await runtime.runExclusive("compaction.catchup", async (signal) => {
 		const combined = AbortSignal.any([signal, event.signal]);
+		if (Date.now() >= deadline) return;
 		const model = await resolveWorkerModel(runtime.ctx, runtime.config, combined);
+		if (combined.aborted || Date.now() >= deadline) return;
 		if (!model.ok) {
 			runtime.noteFailure("compaction.catchup.resolve", model.reason);
 			return;
@@ -60,7 +69,8 @@ async function catchUp(
 			model.value.model.contextWindow,
 		);
 		for (let i = 0; i < runtime.config.compactionCatchUpMaxChunks; i++) {
-			if (Date.now() >= deadline || combined.aborted) break;
+			const remaining = deadline - Date.now();
+			if (remaining <= 0 || combined.aborted) break;
 			const chunk = chunkUnobservedEntries(
 				currentEntries,
 				currentCoverageId,
@@ -69,7 +79,16 @@ async function catchUp(
 				{ observeAttachments: runtime.config.observeAttachments },
 			);
 			if (!chunk) break;
-			const records = await observeChunk(runtime, currentEntries, model.value, chunk, combined);
+			// Bound the awaited worker call, not only the gaps between chunks.
+			// A timeout is a normal catch-up miss, not a worker failure.
+			const chunkSignal = AbortSignal.any([combined, AbortSignal.timeout(remaining)]);
+			let records;
+			try {
+				records = await observeChunk(runtime, currentEntries, model.value, chunk, chunkSignal);
+			} catch (error) {
+				if (chunkSignal.aborted) break;
+				throw error;
+			}
 			if (!records) break;
 			chunks++;
 			currentEntries = runtime.ctx.sessionManager.getBranch() as LedgerEntry[];

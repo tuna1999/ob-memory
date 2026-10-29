@@ -1,5 +1,7 @@
 const PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
 	[/-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z ]+ )?PRIVATE KEY-----/g, "[REDACTED PRIVATE KEY]"],
+	[/\b(?:Authorization|Proxy-Authorization|X-Auth-Token)\s*:\s*(?:Bearer|Basic|Digest|Token)\s+[^\s"',;}]+/gi, "[REDACTED AUTHORIZATION HEADER]"],
+	[/\b(?:Basic|Digest)\s+[A-Za-z0-9._~+/=-]{8,}/gi, "[REDACTED AUTH CREDENTIAL]"],
 	[/\b(?:sk|rk)-[A-Za-z0-9_-]{16,}\b/g, "[REDACTED API KEY]"],
 	[/\bsk-ant-[A-Za-z0-9_-]{16,}\b/g, "[REDACTED API KEY]"],
 	[/\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}\b/g, "[REDACTED API KEY]"],
@@ -27,10 +29,13 @@ const ASSIGNMENT_PATTERN =
 
 export function redactText(text: string): string {
 	let result = text;
-	result = result.replace(ASSIGNMENT_PATTERN, (match, key: string) =>
-		SENSITIVE_KEY_PATTERN.test(key) ? "[REDACTED CREDENTIAL]" : match,
-	);
+	// Token/header patterns run first: the assignment pass only consumes the
+	// scheme word of `Authorization: Bearer <secret>`, which would hide the
+	// secret from the Bearer/Basic patterns. See tests/redact.test.ts.
 	for (const [pattern, replacement] of PATTERNS) result = result.replace(pattern, replacement);
+	result = result.replace(ASSIGNMENT_PATTERN, (match, key: string) =>
+		SENSITIVE_KEY_PATTERN.test(key) && !match.includes("[REDACTED") ? "[REDACTED CREDENTIAL]" : match,
+	);
 	return result;
 }
 

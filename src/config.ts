@@ -121,6 +121,39 @@ const POSITIVE_INT_KEYS = [
 	"agentMaxTokens",
 ] as const;
 
+const MAX_AGENT_TURNS = 32;
+const MAX_CATCH_UP_BUDGET_MS = 25_000;
+const MAX_CATCH_UP_CHUNKS = 8;
+const MAX_WORKER_BUDGET_TOKENS = 1_000_000;
+
+function validateReflectionThreshold(
+	config: ObMemoryConfig,
+	source: string,
+	warnings: string[],
+): void {
+	if (config.reflectAfterTokens <= config.observationsPoolMaxTokens) return;
+	warnings.push(
+		`${source}: reflectAfterTokens (${config.reflectAfterTokens}) exceeds observationsPoolMaxTokens (${config.observationsPoolMaxTokens}); reflection threshold clamped`,
+	);
+	config.reflectAfterTokens = config.observationsPoolMaxTokens;
+}
+
+function clampResourceLimits(config: ObMemoryConfig, source: string, warnings: string[]): void {
+	const limits: ReadonlyArray<[keyof ObMemoryConfig, number]> = [
+		["agentMaxTurns", MAX_AGENT_TURNS],
+		["observerChunkMaxTokens", MAX_WORKER_BUDGET_TOKENS],
+		["workerMemoryMaxTokens", MAX_WORKER_BUDGET_TOKENS],
+		["compactionCatchUpMaxChunks", MAX_CATCH_UP_CHUNKS],
+		["compactionCatchUpBudgetMs", MAX_CATCH_UP_BUDGET_MS],
+	];
+	for (const [key, max] of limits) {
+		const value = config[key];
+		if (typeof value !== "number" || value <= max) continue;
+		warnings.push(`${source}: ${String(key)} (${value}) exceeds the supported maximum; clamped to ${max}`);
+		Object.assign(config, { [key]: max });
+	}
+}
+
 function applyObject(
 	base: ObMemoryConfig,
 	raw: Record<string, unknown>,
@@ -181,6 +214,8 @@ function applyObject(
 		);
 		config.observationsPoolTargetTokens = config.observationsPoolMaxTokens;
 	}
+	validateReflectionThreshold(config, source, warnings);
+	clampResourceLimits(config, source, warnings);
 	return config;
 }
 
@@ -239,6 +274,8 @@ function applyEnv(base: ObMemoryConfig, env: Record<string, string | undefined>,
 		);
 		config.observationsPoolTargetTokens = config.observationsPoolMaxTokens;
 	}
+	validateReflectionThreshold(config, "environment", warnings);
+	clampResourceLimits(config, "environment", warnings);
 	return config;
 }
 

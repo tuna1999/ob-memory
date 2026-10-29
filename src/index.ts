@@ -93,7 +93,11 @@ export default function obMemory(pi: ExtensionAPI): void {
 	pi.on("turn_end", (_event, ctx) => {
 		if (!runtime) return;
 		runtime.updateContext(ctx);
-		if (runtime.isIdle()) scheduleConsolidation(runtime, "turn_end", 300);
+		// When consolidateWhenIdle is false, consolidation itself decides
+		// whether it may run while the host is busy.
+		if (!runtime.config.consolidateWhenIdle || runtime.isIdle()) {
+			scheduleConsolidation(runtime, "turn_end", 300);
+		}
 	});
 
 	pi.on("agent_start", () => {

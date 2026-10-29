@@ -123,8 +123,9 @@ export async function observeChunk(
 		return undefined;
 	}
 	signal.throwIfAborted();
-	// If maxTurns cut the model off mid-chunk, advance only as far as the
-	// accepted observations actually cite instead of claiming the whole chunk.
+	// If maxTurns or an output-length stop cut the model off mid-chunk, advance
+	// only as far as the accepted observations actually cite instead of claiming
+	// the whole chunk.
 	const coversUpToId = exhausted
 		? (farthestSourceEntryId(records, chunk.sourceEntryIds) ?? chunk.coversUpToId)
 		: chunk.coversUpToId;
