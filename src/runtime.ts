@@ -1,0 +1,205 @@
+import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import type { ObMemoryConfig } from "./config-types";
+import { modelLabel } from "./config";
+import { DebugLog } from "./debug-log";
+import { createTokenEstimator, type TokenEstimator } from "./util/tokens";
+
+export type ManagedTimer = Timer;
+
+export interface RuntimeError {
+	stage: string;
+	message: string;
+	at: number;
+}
+
+/**
+ * Per-session state. The extension factory is re-invoked for a new session or
+ * a bound child, so keeping this inside the factory closure isolates sessions
+ * while still giving every handler one stable runtime.
+ */
+export class SessionRuntime {
+	config: ObMemoryConfig;
+	readonly cwd: string;
+	readonly agentDir: string;
+	readonly sessionId: string;
+	readonly debug: DebugLog;
+	ctx: ExtensionContext;
+	estimator: TokenEstimator;
+	busy = false;
+	disposed = false;
+	abortController: AbortController | undefined;
+	lastError: RuntimeError | undefined;
+	failureCount = 0;
+	failureBackoffUntil = 0;
+	lastAutoCompactionReason: "threshold" | "overflow" | "idle" | "incomplete" | undefined;
+	lastAutoCompactionAction: string | undefined;
+	autoCompactionStartedAt = 0;
+	lastCompactionOwned: boolean | undefined;
+	lastCompactionAt = 0;
+	lastCompactionRecords = 0;
+	lastCompactingAt = 0;
+	lastObserverAt = 0;
+	lastReflectorAt = 0;
+	lastDropperAt = 0;
+	lastTriggerReason: string | undefined;
+	emptyBackoff: { coverageId: string | undefined; tokensAtEmpty: number } | undefined;
+	emptyReflectionBackoff: { coverageId: string | undefined; observationTokens: number } | undefined;
+	readonly #pi: ExtensionAPI;
+	readonly #timers = new Set<ManagedTimer>();
+
+	constructor(pi: ExtensionAPI, ctx: ExtensionContext, config: ObMemoryConfig, agentDir: string) {
+		this.#pi = pi;
+		this.ctx = ctx;
+		this.config = config;
+		this.cwd = ctx.cwd;
+		this.agentDir = agentDir;
+		this.sessionId = ctx.sessionManager.getSessionId();
+		this.debug = new DebugLog({
+			enabled: config.debugLog,
+			agentDir,
+			sessionId: this.sessionId,
+		});
+		this.estimator = createTokenEstimator(ctx.model);
+	}
+
+	get modelLabel(): string {
+		return modelLabel(
+			this.config.model ?? {
+				provider: this.ctx.model?.provider ?? "unknown",
+				id: this.ctx.model?.id ?? "unknown",
+			},
+		);
+	}
+
+	get activeModelLabel(): string {
+		const model = this.ctx.model;
+		return model ? `${model.provider}/${model.id}` : "none";
+	}
+
+	updateContext(ctx: ExtensionContext): void {
+		this.ctx = ctx;
+		this.estimator = createTokenEstimator(ctx.model);
+	}
+
+	schedule(fn: () => void | Promise<void>, delayMs: number): ManagedTimer {
+		const timer = this.ctx.setTimeout(async () => {
+			this.#timers.delete(timer);
+			if (this.disposed) return;
+			try {
+				await fn();
+			} catch (error) {
+				this.recordError("timer", error);
+			}
+		}, Math.max(0, delayMs));
+		this.#timers.add(timer);
+		return timer;
+	}
+
+	clearTimer(timer: ManagedTimer): void {
+		this.#timers.delete(timer);
+		try {
+			this.ctx.clearTimer(timer);
+		} catch {
+			// Session teardown may already have cleared it.
+		}
+	}
+
+	append(customType: string, data: unknown): boolean {
+		if (this.disposed) return false;
+		try {
+			this.#pi.appendEntry(customType, data);
+			return true;
+		} catch (error) {
+			this.recordError(`append:${customType}`, error);
+			return false;
+		}
+	}
+
+	notify(message: string, type: "info" | "warning" | "error" = "info"): void {
+		if (!this.config.showNotifications || !this.ctx.hasUI) return;
+		try {
+			this.ctx.ui.notify(message, type);
+		} catch {
+			// Notifications are optional in every mode.
+		}
+	}
+
+	recordError(stage: string, error: unknown): void {
+		const message = error instanceof Error ? error.message : String(error);
+		this.lastError = { stage, message, at: Date.now() };
+		this.debug.record(stage, "error", { message });
+	}
+
+	noteFailure(stage: string, error: unknown): void {
+		this.failureCount++;
+		const delay = Math.min(5 * 60_000, 2 ** Math.min(this.failureCount, 6) * 1_000);
+		this.failureBackoffUntil = Date.now() + delay;
+		this.recordError(stage, error);
+	}
+
+	noteSuccess(): void {
+		this.failureCount = 0;
+		this.failureBackoffUntil = 0;
+	}
+
+	isFailureBackoffActive(): boolean {
+		return Date.now() < this.failureBackoffUntil;
+	}
+
+	isIdle(): boolean {
+		try {
+			return this.ctx.isIdle();
+		} catch {
+			return true;
+		}
+	}
+
+	/**
+	 * Run one consolidation/compaction pass at a time. Returning false is a
+	 * normal scheduling outcome, not an error; the next trigger will retry.
+	 */
+	async runExclusive(
+		label: string,
+		fn: (signal: AbortSignal) => Promise<void>,
+		options: { requireIdle?: boolean } = {},
+	): Promise<boolean> {
+		if (this.busy || this.disposed) return false;
+		if ((options.requireIdle ?? true) && this.config.consolidateWhenIdle && !this.isIdle()) {
+			this.debug.record(label, "skipped_not_idle");
+			return false;
+		}
+		this.busy = true;
+		this.abortController = new AbortController();
+		const signal = this.abortController.signal;
+		try {
+			await fn(signal);
+			return true;
+		} catch (error) {
+			if (!signal.aborted) this.noteFailure(label, error);
+			return false;
+		} finally {
+			this.busy = false;
+			this.abortController = undefined;
+		}
+	}
+
+	abort(reason: string): void {
+		if (!this.abortController) return;
+		this.debug.record("runtime", "abort", { reason });
+		this.abortController.abort(reason);
+	}
+
+	dispose(reason = "session_end"): void {
+		if (this.disposed) return;
+		this.disposed = true;
+		this.abort(reason);
+		for (const timer of this.#timers) {
+			try {
+				this.ctx.clearTimer(timer);
+			} catch {
+				// ignore teardown races
+			}
+		}
+		this.#timers.clear();
+	}
+}

@@ -1,0 +1,258 @@
+import type {
+	ExtensionAPI,
+	ExtensionContext,
+	SessionBeforeCompactEvent,
+	SessionBeforeCompactResult,
+} from "@oh-my-pi/pi-coding-agent";
+import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
+import {
+	OM_OBSERVATIONS_RECORDED,
+	type LedgerEntry,
+	type MemoryDetails,
+} from "../ledger/types";
+import {
+	compactionProjection,
+	latestCoverageId,
+	latestCoverageIndex,
+} from "../ledger/fold";
+import { renderMemory } from "../ledger/render";
+import { chunkUnobservedEntries } from "../ledger/serialize";
+import { redactText } from "../security/redact";
+import type { SessionRuntime } from "../runtime";
+import { resolveWorkerModel } from "../workers/model";
+import { observeChunk } from "../workers/trigger";
+import { resolveCompactionCut, type CompactionReason, type CutResolution } from "./cut";
+import {
+	compactionRetainedBudget,
+	compactionSummaryBudget,
+	recordAutoCompactionEnd,
+	recordAutoCompactionStart,
+	resolveCompactionReason,
+	shouldOwnCompaction,
+} from "./policy";
+
+interface CatchUpOutcome {
+	chunks: number;
+	entries: LedgerEntry[];
+	coverageIndex: number;
+}
+
+async function catchUp(
+	runtime: SessionRuntime,
+	event: SessionBeforeCompactEvent,
+	entries: LedgerEntry[],
+	coverageId: string | undefined,
+): Promise<CatchUpOutcome> {
+	let chunks = 0;
+	let currentEntries = entries;
+	let currentCoverageId = coverageId;
+	const deadline = Date.now() + runtime.config.compactionCatchUpBudgetMs;
+	const ran = await runtime.runExclusive("compaction.catchup", async (signal) => {
+		const combined = AbortSignal.any([signal, event.signal]);
+		const model = await resolveWorkerModel(runtime.ctx, runtime.config, combined);
+		if (!model.ok) {
+			runtime.noteFailure("compaction.catchup.resolve", model.reason);
+			return;
+		}
+		for (let i = 0; i < runtime.config.compactionCatchUpMaxChunks; i++) {
+			if (Date.now() >= deadline || combined.aborted) break;
+			const chunk = chunkUnobservedEntries(
+				currentEntries,
+				currentCoverageId,
+				runtime.config.observerChunkMaxTokens,
+				runtime.estimator,
+				{ observeAttachments: runtime.config.observeAttachments },
+			);
+			if (!chunk) break;
+			const records = await observeChunk(runtime, currentEntries, model.value, chunk, combined);
+			if (!records) break;
+			chunks++;
+			currentEntries = runtime.ctx.sessionManager.getBranch() as LedgerEntry[];
+			currentCoverageId = latestCoverageId(currentEntries, OM_OBSERVATIONS_RECORDED);
+		}
+	}, { requireIdle: false });
+	return {
+		chunks: ran ? chunks : 0,
+		entries: currentEntries,
+		coverageIndex: latestCoverageIndex(currentEntries, OM_OBSERVATIONS_RECORDED),
+	};
+}
+
+function delegate(
+	runtime: SessionRuntime,
+	reason: CompactionReason,
+	why: string,
+	gap?: { gap?: { entryCount: number } },
+): undefined {
+	runtime.lastCompactionOwned = false;
+	runtime.debug.record("compaction", "delegated", {
+		reason,
+		why,
+		gapEntries: gap?.gap?.entryCount,
+	});
+	return undefined;
+}
+
+function buildCompactionResult(
+	runtime: SessionRuntime,
+	event: SessionBeforeCompactEvent,
+	resolution: Extract<CutResolution, { kind: "cut" }>,
+	entries: LedgerEntry[],
+): SessionBeforeCompactResult | undefined {
+	const projection = compactionProjection(entries, resolution.foldThroughEntryId);
+	if (projection.observations.length + projection.reflections.length === 0) return undefined;
+	const rendered = renderMemory(projection.reflections, projection.observations, {
+		maxTokens: compactionSummaryBudget(runtime),
+		estimate: runtime.estimator,
+	});
+	if (!rendered.text || rendered.observations.length + rendered.reflections.length === 0) return undefined;
+
+	if (resolution.retainedTokens !== undefined) {
+		const retainedBudget = compactionRetainedBudget(runtime);
+		if (resolution.retainedTokens + rendered.tokens > retainedBudget) {
+			runtime.debug.record("compaction", "retained_budget_exceeded", {
+				retainedTokens: resolution.retainedTokens,
+				summaryTokens: rendered.tokens,
+				retainedBudget,
+			});
+			return undefined;
+		}
+	}
+
+	const details: MemoryDetails = {
+		...projection.details,
+		observations: rendered.observations,
+		reflections: rendered.reflections,
+		foldThroughEntryId: resolution.foldThroughEntryId,
+	};
+	const summary = runtime.config.redactSecrets ? redactText(rendered.text) : rendered.text;
+	const compaction: CompactionResult<MemoryDetails> = {
+		summary,
+		shortSummary: `Observational memory: ${rendered.observations.length} observations, ${rendered.reflections.length} reflections`,
+		firstKeptEntryId: resolution.firstKeptEntryId,
+		tokensBefore: event.preparation.tokensBefore,
+		details,
+	};
+	runtime.lastCompactionOwned = true;
+	runtime.lastCompactionAt = Date.now();
+	runtime.lastCompactionRecords = rendered.observations.length + rendered.reflections.length;
+	runtime.debug.record("compaction", "owned", {
+		firstKeptEntryId: resolution.firstKeptEntryId,
+		foldThroughEntryId: resolution.foldThroughEntryId,
+		observations: rendered.observations.length,
+		reflections: rendered.reflections.length,
+		summaryTokens: rendered.tokens,
+		retainedTokens: resolution.retainedTokens,
+		gap: resolution.gap?.entryCount,
+	});
+	return { compaction };
+}
+
+/**
+ * Take ownership of compaction only when the ledger covers every source entry
+ * being summarized, or when the uncovered tail can be retained within budget.
+ * Otherwise native compaction runs, preserving the raw context.
+ */
+export async function handleSessionBeforeCompact(
+	runtime: SessionRuntime,
+	event: SessionBeforeCompactEvent,
+	ctx: ExtensionContext,
+): Promise<SessionBeforeCompactResult | undefined> {
+	runtime.updateContext(ctx);
+	const reason = resolveCompactionReason(runtime);
+	try {
+		if (event.customInstructions?.trim()) {
+			return delegate(runtime, reason, "user focus instructions require native summarization");
+		}
+		let entries = event.branchEntries as LedgerEntry[];
+		let coverageIndex = latestCoverageIndex(entries, OM_OBSERVATIONS_RECORDED);
+		if (!shouldOwnCompaction(runtime, reason, coverageIndex >= 0)) {
+			return delegate(runtime, reason, "policy or no coverage");
+		}
+
+		const rangeStart = (() => {
+			for (let i = entries.length - 1; i >= 0; i--) {
+				if (entries[i]?.type === "compaction") return i;
+			}
+			return -1;
+		})();
+		let resolution = resolveCompactionCut(entries, event.preparation.firstKeptEntryId, coverageIndex, {
+			reason,
+			runtime,
+			rangeStartIndex: rangeStart,
+		});
+
+		if (
+			resolution.kind === "cut" &&
+			resolution.gap &&
+			runtime.config.compactionCatchUpMaxChunks > 0 &&
+			!runtime.busy
+		) {
+			const catchUpResult = await catchUp(
+				runtime,
+				event,
+				entries,
+				latestCoverageId(entries, OM_OBSERVATIONS_RECORDED),
+			);
+			if (catchUpResult.chunks > 0) {
+				entries = catchUpResult.entries;
+				coverageIndex = catchUpResult.coverageIndex;
+				resolution = resolveCompactionCut(entries, event.preparation.firstKeptEntryId, coverageIndex, {
+					reason,
+					runtime,
+					rangeStartIndex: rangeStart,
+				});
+			}
+		}
+
+		if (resolution.kind === "delegate") {
+			return delegate(runtime, reason, resolution.reason, resolution);
+		}
+		if (resolution.gap) {
+			runtime.debug.record("compaction", "retaining_unobserved_tail", {
+				gapEntries: resolution.gap.entryCount,
+				retainedTokens: resolution.retainedTokens,
+				firstKeptEntryId: resolution.firstKeptEntryId,
+			});
+		}
+		const result = buildCompactionResult(runtime, event, resolution, entries);
+		if (!result) {
+			return delegate(runtime, reason, "no rendered memory fits or no records");
+		}
+		return result;
+	} catch (error) {
+		runtime.recordError("compaction.before", error);
+		runtime.lastCompactionOwned = false;
+		return undefined;
+	}
+}
+
+export function registerCompactionEvents(pi: ExtensionAPI, getRuntime: () => SessionRuntime | undefined): void {
+	pi.on("auto_compaction_start", (event, ctx) => {
+		const runtime = getRuntime();
+		if (!runtime) return;
+		runtime.updateContext(ctx);
+		recordAutoCompactionStart(runtime, event);
+	});
+	pi.on("auto_compaction_end", (event, ctx) => {
+		const runtime = getRuntime();
+		if (!runtime) return;
+		runtime.updateContext(ctx);
+		recordAutoCompactionEnd(runtime, event);
+	});
+	pi.on("session_compact", (event, ctx) => {
+		const runtime = getRuntime();
+		if (!runtime) return;
+		runtime.updateContext(ctx);
+		runtime.lastCompactionOwned = event.fromExtension;
+		runtime.lastCompactionAt = Date.now();
+		runtime.lastAutoCompactionReason = undefined;
+		runtime.lastAutoCompactionAction = undefined;
+		runtime.autoCompactionStartedAt = 0;
+		runtime.debug.record("compaction", "session_compact", {
+			fromExtension: event.fromExtension,
+			entryId: event.compactionEntry.id,
+			details: event.compactionEntry.details ? "present" : undefined,
+		});
+	});
+}
