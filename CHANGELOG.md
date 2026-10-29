@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.0
+
+- `/ob-memory` now offers argument completions in the TUI: subcommands on the first token, `view full` once a tail prefix is typed, and `passive on|off` immediately.
+- Added repository guidelines in `AGENTS.md`, including the Plane tracking workflow.
+
 ## 0.1.1
 
 - Fixed observer coverage advancing past an entry that was omitted from an over-budget chunk (tool-pair overflow). Every selected entry is now serialized, with per-entry truncation when needed.

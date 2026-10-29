@@ -1,4 +1,5 @@
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { getMemoryCommandCompletions } from "./commands/completions";
 import { handleMemoryCommand } from "./commands/control";
 import { loadConfig, resolveAgentDir } from "./config";
 import { handleSessionBeforeCompact, registerCompactionEvents } from "./hooks/compaction";
@@ -74,6 +75,7 @@ export default function obMemory(pi: ExtensionAPI): void {
 
 	pi.registerCommand("ob-memory", {
 		description: "Inspect or control observational memory",
+		getArgumentCompletions: getMemoryCommandCompletions,
 		handler: async (args, ctx) => {
 			if (!runtime) {
 				ctx.ui.notify("Observational Memory is not active in this session.", "warning");

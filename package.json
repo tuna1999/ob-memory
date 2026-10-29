@@ -1,6 +1,6 @@
 {
   "name": "ob-memory",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Observational memory for oh-my-pi: a branch-local, source-backed memory ledger that survives compaction.",
   "private": true,
   "type": "module",
