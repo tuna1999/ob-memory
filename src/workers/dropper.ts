@@ -1,4 +1,5 @@
 import { completeSimple, type TJsonSchema } from "@oh-my-pi/pi-ai";
+import { estimateTextTokens } from "../constants";
 import { observationLine, reflectionLine, type Observation, type Reflection } from "../ledger/types";
 import { redactText } from "../security/redact";
 import type { SessionRuntime } from "../runtime";
@@ -71,6 +72,55 @@ function isCovered(observationId: string, reflections: readonly Reflection[]): b
 	return reflections.some((reflection) => reflection.supportingObservationIds.includes(observationId));
 }
 
+interface BoundedDropperContext {
+	text: string;
+	observations: Observation[];
+	omitted: number;
+}
+
+/**
+ * Keep the worker request inside `workerMemoryMaxTokens`. Oldest observations
+ * are the primary drop candidates, so the window is oldest-first; newer ones
+ * are omitted and cannot be selected.
+ */
+function boundedContext(
+	reflections: readonly Reflection[],
+	observations: readonly Observation[],
+	maxTokens: number,
+): BoundedDropperContext {
+	const reflectionLines = reflections.map(reflectionLine);
+	let tokens = estimateTextTokens("CURRENT REFLECTIONS:\nCURRENT OBSERVATIONS:\n(none yet)");
+	const selectedReflections: string[] = [];
+	for (let i = reflectionLines.length - 1; i >= 0; i--) {
+		const line = reflectionLines[i]!;
+		const cost = estimateTextTokens(line) + 1;
+		if (tokens + cost > maxTokens) continue;
+		selectedReflections.unshift(line);
+		tokens += cost;
+	}
+	const selectedLines: string[] = [];
+	const included: Observation[] = [];
+	for (const observation of observations) {
+		const line = `${observationLine(observation)} [coverage: ${coverageTier(observation.id, reflections)}]`;
+		const cost = estimateTextTokens(line) + 1;
+		if (tokens + cost > maxTokens) break;
+		selectedLines.push(line);
+		included.push(observation);
+		tokens += cost;
+	}
+	const omitted = observations.length - included.length;
+	const omittedNote = omitted > 0 ? `\n(${omitted} newer observation${omitted === 1 ? "" : "s"} omitted to fit the worker memory budget.)` : "";
+	return {
+		text: `CURRENT REFLECTIONS:
+${selectedReflections.length > 0 ? selectedReflections.join("\n") : "(none yet)"}
+
+CURRENT OBSERVATIONS:
+${selectedLines.length > 0 ? selectedLines.join("\n") : "(none yet)"}${omittedNote}`,
+		observations: included,
+		omitted,
+	};
+}
+
 /**
  * Retire only active observations whose loss is demonstrably safe. Critical
  * records are never drop candidates; high-relevance records need reflection
@@ -82,7 +132,9 @@ export async function runDropper(options: RunDropperOptions): Promise<string[] |
 	const metrics = observationPoolMetrics(observations, targetTokens);
 	if (metrics.maxDropsAllowed <= 0) return undefined;
 
-	const allowed = new Map(observations.map((observation) => [observation.id, observation]));
+	const context = boundedContext(reflections, observations, runtime.config.workerMemoryMaxTokens);
+	if (context.observations.length === 0) return undefined;
+	const allowed = new Map(context.observations.map((observation) => [observation.id, observation]));
 	const selected = new Set<string>();
 	let rejected = 0;
 	let duplicates = 0;
@@ -126,22 +178,20 @@ export async function runDropper(options: RunDropperOptions): Promise<string[] |
 		},
 	};
 
-	if (!observations.some((observation) => observation.relevance !== "critical" && (observation.relevance !== "high" || isCovered(observation.id, reflections)))) {
+	if (
+		!context.observations.some(
+			(observation) =>
+				observation.relevance !== "critical" &&
+				(observation.relevance !== "high" || isCovered(observation.id, reflections)),
+		)
+	) {
 		return undefined;
 	}
 
-	const observationLines = observations.map(
-		(observation) => `${observationLine(observation)} [coverage: ${coverageTier(observation.id, reflections)}]`,
-	);
-	const reflectionLines = reflections.map(reflectionLine);
-	const rawUser = `CURRENT REFLECTIONS:
-${reflectionLines.length > 0 ? reflectionLines.join("\n") : "(none yet)"}
-
-CURRENT OBSERVATIONS:
-${observationLines.join("\n")}
+	const rawUser = `${context.text}
 
 Active pool: ~${metrics.observationTokens.toLocaleString()} tokens; target: ~${metrics.targetTokens.toLocaleString()}; over target by ~${metrics.tokensOverTarget.toLocaleString()}.
-Hard maximum drops this run: ${metrics.maxDropsAllowed}. The maximum is an upper bound, not a target. Drop only clearly safe observations; critical records are never accepted and high records need reflection coverage.`;
+Hard maximum drops this run: ${metrics.maxDropsAllowed}. The maximum is an upper bound, not a target. Drop only clearly safe observations; critical records are never accepted and high records need reflection coverage. Only ids listed above are valid.`;
 	const user = runtime.config.redactSecrets ? redactText(rawUser) : rawUser;
 
 	const result = await runWorkerLoop({

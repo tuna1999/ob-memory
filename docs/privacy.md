@@ -21,9 +21,10 @@ With `redactSecrets: true` (default), the plugin applies best-effort pattern red
 - stored observation and reflection content;
 - compaction summaries and fallback context;
 - `ob_recall` output;
+- `/ob-memory status` output and automatic notifications;
 - debug log fields.
 
-Patterns cover common API keys, bearer tokens, private-key blocks, AWS access keys, GitHub tokens, Google keys, Slack tokens, and `password`/`secret`/`token` assignments. Object keys such as `apiKey`, `authorization`, and `credential` are replaced wholesale in debug structures, while numeric fields such as `tokenCount` are preserved.
+Patterns cover common API keys, bearer tokens, private-key blocks, AWS access keys and `AWS_SECRET_ACCESS_KEY`-style assignments, cloud/vendor token prefixes (Stripe, GitHub, GitLab, PyPI, npm, Hugging Face, Google, Slack), and `password`/`secret`/`token` assignments. Object keys such as `apiKey`, `AWS_SECRET_ACCESS_KEY`, `refreshToken`, `authorization`, and `credential` are replaced wholesale in debug structures, while numeric fields such as `tokenCount` are preserved.
 
 Redaction is not encryption and cannot guarantee that every credential shape is caught. Treat debug logs and session journals as sensitive. Do not enable `debugLog` in an environment where its metadata is not acceptable.
 

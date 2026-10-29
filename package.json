@@ -1,10 +1,14 @@
 {
   "name": "ob-memory",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Observational memory for oh-my-pi: a branch-local, source-backed memory ledger that survives compaction.",
   "private": true,
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tuna1999/ob-memory.git"
+  },
   "omp": {
     "extensions": [
       "./src/index.ts"

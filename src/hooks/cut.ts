@@ -42,6 +42,13 @@ function lastSourceIndexBefore(entries: readonly LedgerEntry[], cutIndex: number
 	return -1;
 }
 
+function lastResetBoundaryIndex(entries: readonly LedgerEntry[]): number {
+	for (let i = entries.length - 1; i >= 0; i--) {
+		if (entries[i]?.type === "reset_boundary") return i;
+	}
+	return -1;
+}
+
 function safeCutAtOrBefore(entries: readonly LedgerEntry[], index: number, minimum: number): number {
 	for (let i = Math.min(index, entries.length - 1); i >= minimum; i--) {
 		const entry = entries[i];
@@ -103,8 +110,12 @@ export function resolveCompactionCut(
 
 	if (options.reason === "overflow") return { kind: "delegate", reason: "overflow recovery", gap };
 
-	const safeCut = safeCutAtOrBefore(entries, gapStart, options.rangeStartIndex + 1);
-	if (safeCut <= options.rangeStartIndex) {
+	// A `/clear` reset is a lower bound just like the previous compaction:
+	// keeping entries from before it would put cleared conversation back into
+	// the model context.
+	const lowerBound = Math.max(options.rangeStartIndex, lastResetBoundaryIndex(entries));
+	const safeCut = safeCutAtOrBefore(entries, gapStart, lowerBound + 1);
+	if (safeCut <= lowerBound) {
 		return { kind: "delegate", reason: "no safe cut point before unobserved source", gap };
 	}
 	const retainedTokens = rawTokensAfterIndex(entries, safeCut - 1, (entry) => estimateEntryTokens(entry, options.runtime.estimator));

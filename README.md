@@ -26,20 +26,44 @@ The session journal remains the only persistent store. Folding on read makes the
 
 ## Install
 
+The plugin is distributed from the public GitHub repository (it is not published to npm):
+
 ```bash
-omp plugin install /absolute/path/to/ob-memory
+omp plugin install github:tuna1999/ob-memory
 ```
 
-or load it explicitly:
+A full git URL works too:
 
 ```bash
-omp -e /absolute/path/to/ob-memory/src/index.ts
+omp plugin install https://github.com/tuna1999/ob-memory
 ```
 
-For local development:
+Git installs need `git` on `PATH`; omp supplies its own Bun for the install itself.
+
+Update a GitHub install later with:
 
 ```bash
+omp plugin upgrade ob-memory
+```
+
+For local development, clone the repository and link the checkout instead:
+
+```bash
+git clone https://github.com/tuna1999/ob-memory.git
+cd ob-memory
 bun install
+omp plugin install "$PWD"
+```
+
+Or load a checkout directly without installing it:
+
+```bash
+omp -e ./src/index.ts
+```
+
+Development checks:
+
+```bash
 bun run typecheck
 bun test
 ```

@@ -16,7 +16,7 @@ export interface ObMemoryConfig {
 	reflectAfterTokens: number;
 	/** Maximum size of one source chunk sent to the observer. */
 	observerChunkMaxTokens: number;
-	/** Hard active-observation pool size. */
+	/** Active-observation pool size above which the dropper is considered. */
 	observationsPoolMaxTokens: number;
 	/** Soft active-observation target used by the dropper. */
 	observationsPoolTargetTokens: number;
@@ -45,6 +45,7 @@ export interface ObMemoryConfig {
 	ownManualCompaction: boolean;
 	ownAutoCompaction: boolean;
 	debugLog: boolean;
+	/** Show automatic warnings/status; explicit command output is always shown. */
 	showNotifications: boolean;
 }
 

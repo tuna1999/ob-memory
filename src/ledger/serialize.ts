@@ -64,7 +64,8 @@ function truncateRendered(text: string, maxChars = MAX_SOURCE_ENTRY_CHARS): stri
 	const marker = `\n[… ${text.length - maxChars} chars truncated; original remains in the session ledger …]\n`;
 	const retained = Math.max(1, maxChars - marker.length);
 	const head = Math.ceil(retained / 2);
-	return `${text.slice(0, head)}${marker}${text.slice(-(retained - head))}`;
+	const tail = retained - head;
+	return `${text.slice(0, head)}${marker}${tail > 0 ? text.slice(-tail) : ""}`;
 }
 
 /** Render one source entry as plain text for a worker prompt. */
@@ -114,23 +115,33 @@ interface SerializedBlock {
 	entry: LedgerEntry;
 	text: string;
 	tokens: number;
+	truncated?: boolean;
 }
 
 function sourceBlock(
 	entry: LedgerEntry,
 	estimate: TokenEstimator,
 	options: SerializedEntryOptions,
+	perEntryMaxChars?: number,
 ): SerializedBlock | undefined {
-	const rendered = serializeEntry(entry, options);
+	let rendered = serializeEntry(entry, options);
 	if (!rendered.trim()) return undefined;
+	const truncated = perEntryMaxChars !== undefined && rendered.length > perEntryMaxChars;
+	if (truncated) rendered = truncateRendered(rendered, perEntryMaxChars);
 	const text = `[Source entry id: ${entry.id}]\n${rendered}`;
-	return { entry, text, tokens: estimate(text) };
+	return { entry, text, tokens: estimate(text), truncated };
 }
 
 /** Serialize entries with stable source labels, optionally bounded by tokens. */
 export function serializeSourceEntries(
 	entries: readonly LedgerEntry[],
-	options: { maxTokens?: number; estimate?: TokenEstimator; observeAttachments?: boolean } = {},
+	options: {
+		maxTokens?: number;
+		estimate?: TokenEstimator;
+		observeAttachments?: boolean;
+		/** Truncate each rendered entry to this many characters instead of dropping entries. */
+		perEntryMaxChars?: number;
+	} = {},
 ): SerializedSource {
 	const estimate = options.estimate ?? estimateTextTokens;
 	const entryOptions: SerializedEntryOptions = { observeAttachments: options.observeAttachments };
@@ -140,12 +151,12 @@ export function serializeSourceEntries(
 	let tokens = 0;
 	for (const entry of entries) {
 		if (!isSourceEntry(entry)) continue;
-		const block = sourceBlock(entry, estimate, entryOptions);
+		const block = sourceBlock(entry, estimate, entryOptions, options.perEntryMaxChars);
 		if (!block) continue;
 		const separator = blocks.length > 0 ? 2 : 0;
 		if (options.maxTokens !== undefined && tokens + block.tokens + separator > options.maxTokens) {
 			if (blocks.length > 0) break;
-			const marker = "\n[… source entry truncated to fit the worker input budget …]\n";
+			const marker = "\n[… source entry truncated to fit the input budget …]\n";
 			const budgetChars = Math.max(200, options.maxTokens * 4 - marker.length - 60);
 			const head = Math.ceil(budgetChars / 2);
 			const rendered = serializeEntry(entry, entryOptions);
@@ -158,6 +169,7 @@ export function serializeSourceEntries(
 		}
 		blocks.push(block);
 		sourceEntryIds.push(entry.id);
+		if (block.truncated) truncatedSourceEntryIds.push(entry.id);
 		tokens += block.tokens + separator;
 	}
 	return {
@@ -177,10 +189,16 @@ function isAssistantToolCall(entry: LedgerEntry | undefined): boolean {
 	return contentBlocks(messageField(entry.message, "content")).some((block) => block.type === "toolCall");
 }
 
-function safeStartIndex(entries: readonly LedgerEntry[], index: number): number {
-	let start = Math.max(0, index);
-	while (start > 0 && isToolResultEntry(entries[start])) start--;
-	return start;
+function safeStartIndex(entries: readonly LedgerEntry[], coverageIndex: number): number {
+	const start = Math.max(0, coverageIndex + 1);
+	if (!isToolResultEntry(entries[start])) return start;
+	// The watermark itself is a tool result: the assistant call and earlier
+	// results were already sent, so start after them instead of re-observing
+	// the same prefix forever (long parallel tool-result runs).
+	if (coverageIndex >= 0 && isToolResultEntry(entries[coverageIndex])) return start;
+	let backed = start;
+	while (backed > 0 && isToolResultEntry(entries[backed])) backed--;
+	return backed;
 }
 
 export interface SourceChunk {
@@ -193,9 +211,10 @@ export interface SourceChunk {
 }
 
 /**
- * Select the oldest unobserved source entries up to a token budget. The cut is
- * never placed immediately before a tool result, so an observation watermark
- * cannot split a tool call from its result across chunks.
+ * Select the oldest unobserved source entries up to a token budget. A cut is
+ * avoided immediately before a tool result unless the previous chunk already
+ * covered that call (the watermark itself is a tool result), in which case
+ * starting mid-run is the only way to make progress.
  */
 export function chunkUnobservedEntries(
 	entries: readonly LedgerEntry[],
@@ -205,36 +224,56 @@ export function chunkUnobservedEntries(
 	options: SerializedEntryOptions = {},
 ): SourceChunk | undefined {
 	const coverageIndex = coverageId ? entries.findIndex((entry) => entry.id === coverageId) : -1;
-	const start = safeStartIndex(entries, coverageIndex + 1);
+	const start = safeStartIndex(entries, coverageIndex);
+	const maxEntries = Math.max(8, Math.floor(maxTokens / 32));
 	const selected: LedgerEntry[] = [];
 	let tokens = 0;
 	for (let i = start; i < entries.length; i++) {
+		if (selected.length >= maxEntries) break;
 		const entry = entries[i];
 		if (!entry || !isSourceEntry(entry)) continue;
 		const block = sourceBlock(entry, estimate, options);
 		if (!block) continue;
+		const separator = selected.length > 0 ? 2 : 0;
 		const preservesToolPair =
 			isToolResultEntry(entry) &&
 			selected.length > 0 &&
 			(isAssistantToolCall(selected[selected.length - 1]) || isToolResultEntry(selected[selected.length - 1]));
-		if (selected.length > 0 && tokens + block.tokens > maxTokens && !preservesToolPair) break;
+		if (selected.length > 0 && tokens + block.tokens + separator > maxTokens && !preservesToolPair) break;
 		selected.push(entry);
-		tokens += block.tokens;
+		tokens += block.tokens + separator;
 	}
 	if (selected.length === 0) return undefined;
+	// A preserved tool pair can push the selection past the budget. Truncate
+	// every entry to a fair per-entry share instead of dropping whole entries:
+	// coversUpToId must never claim an entry the observer did not receive.
 	const serialized = serializeSourceEntries(selected, {
-		maxTokens: Math.max(maxTokens, 256),
+		...(tokens > maxTokens
+			? {
+					// Subtract the fixed label/separator overhead per entry, then
+					// split what remains. The 32-char floor keeps a marker, but a
+					// pathological run of thousands of tool results can still
+					// exceed a very small budget.
+					perEntryMaxChars: Math.max(
+						32,
+						Math.floor(
+							(Math.max(maxTokens, 256) * 4 - selected.length * 48) / selected.length,
+						),
+					),
+				}
+			: { maxTokens: tokens + 16 }),
 		estimate,
 		observeAttachments: options.observeAttachments,
 	});
 	if (!serialized.text) return undefined;
-	const last = selected[selected.length - 1]!;
+	// Defensive: never advance the watermark past the last entry actually sent.
+	const coversUpToId = serialized.sourceEntryIds[serialized.sourceEntryIds.length - 1] ?? selected[0]!.id;
 	return {
 		entries: selected,
 		text: serialized.text,
 		sourceEntryIds: serialized.sourceEntryIds,
 		truncatedSourceEntryIds: serialized.truncatedSourceEntryIds,
-		coversUpToId: last.id,
+		coversUpToId,
 		tokens: serialized.tokens,
 	};
 }

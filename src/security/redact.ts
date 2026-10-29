@@ -2,6 +2,11 @@ const PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
 	[/-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z ]+ )?PRIVATE KEY-----/g, "[REDACTED PRIVATE KEY]"],
 	[/\b(?:sk|rk)-[A-Za-z0-9_-]{16,}\b/g, "[REDACTED API KEY]"],
 	[/\bsk-ant-[A-Za-z0-9_-]{16,}\b/g, "[REDACTED API KEY]"],
+	[/\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}\b/g, "[REDACTED API KEY]"],
+	[/\bwhsec_[A-Za-z0-9]{16,}\b/g, "[REDACTED WEBHOOK SECRET]"],
+	[/\b(?:gsk|hf|npm)_[A-Za-z0-9]{16,}\b/g, "[REDACTED API KEY]"],
+	[/\bglpat-[A-Za-z0-9_-]{16,}\b/g, "[REDACTED GITLAB TOKEN]"],
+	[/\bpypi-[A-Za-z0-9_-]{16,}\b/g, "[REDACTED PYPI TOKEN]"],
 	[/\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, "[REDACTED GITHUB TOKEN]"],
 	[/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, "[REDACTED GITHUB TOKEN]"],
 	[/\bAKIA[0-9A-Z]{16}\b/g, "[REDACTED AWS ACCESS KEY]"],
@@ -9,11 +14,22 @@ const PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
 	[/\bAIza[0-9A-Za-z_-]{30,}\b/g, "[REDACTED GOOGLE KEY]"],
 	[/\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, "[REDACTED SLACK TOKEN]"],
 	[/\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi, "Bearer [REDACTED]"],
-	[/\b(?:password|passwd|pwd|secret|token|api[_-]?key)\s*[=:]\s*["']?[^\s"',;}]{4,}/gi, "[REDACTED CREDENTIAL]"],
 ];
+
+const SENSITIVE_KEY_PATTERN =
+	/^(?:api[_-]?key|access[_-]?key|account[_-]?key|private[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|token|secret|client[_-]?secret|password|passwd|pwd|authorization|bearer|cookie|credential)$|(?:^|[_-])(?:api[_-]?key|access[_-]?key|account[_-]?key|private[_-]?key|secret|token|password|passwd|pwd|authorization|bearer|cookie|credential)(?:$|[_-])|(?:Secret|Token|Password|Passwd|Credential)(?:Key|Id)?$/i;
+
+// Match `KEY=value`/`Key: "value"` assignments, then decide in JS whether the
+// key is sensitive. Keeping the key bounded avoids the catastrophic
+// backtracking a broad `[\w-]*keyword[\w-]*` regex causes on long tokens.
+const ASSIGNMENT_PATTERN =
+	/["']?\b([A-Za-z0-9_.-]{1,64})\b["']?\s*[=:]\s*(?:"[^"]*"|'[^']*'|[^\s"',;}]{4,})/g;
 
 export function redactText(text: string): string {
 	let result = text;
+	result = result.replace(ASSIGNMENT_PATTERN, (match, key: string) =>
+		SENSITIVE_KEY_PATTERN.test(key) ? "[REDACTED CREDENTIAL]" : match,
+	);
 	for (const [pattern, replacement] of PATTERNS) result = result.replace(pattern, replacement);
 	return result;
 }
@@ -29,7 +45,7 @@ export function redactValue(value: unknown, depth = 0): unknown {
 	if (!value || typeof value !== "object") return value;
 	const result: Record<string, unknown> = {};
 	for (const [key, item] of Object.entries(value as Record<string, unknown>).slice(0, 100)) {
-		if (/^(?:api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|token|secret|client[_-]?secret|password|passwd|authorization|cookie|credential|private[_-]?key)$/i.test(key)) {
+		if (SENSITIVE_KEY_PATTERN.test(key)) {
 			result[key] = "[REDACTED]";
 		} else {
 			result[key] = redactValue(item, depth + 1);

@@ -48,10 +48,12 @@ export default function obMemory(pi: ExtensionAPI): void {
 			cwd: ctx.cwd,
 			agentDir: directory,
 			env: process.env,
-			warn: (message) => {
-				if (ctx.hasUI) ctx.ui.notify(`Observational Memory config: ${message}`, "warning");
-			},
 		});
+		if (ctx.hasUI && loaded.config.showNotifications) {
+			for (const warning of loaded.warnings) {
+				ctx.ui.notify(`Observational Memory config: ${warning}`, "warning");
+			}
+		}
 		runtime = new SessionRuntime(pi, ctx, loaded.config, directory);
 		runtime.debug.record("session", "bind", {
 			reason,
@@ -126,6 +128,12 @@ export default function obMemory(pi: ExtensionAPI): void {
 		if (!runtime) return;
 		cancelScheduledConsolidation(runtime);
 		runtime.abort("branch");
+	});
+
+	pi.on("session_before_tree", () => {
+		if (!runtime) return;
+		cancelScheduledConsolidation(runtime);
+		runtime.abort("tree");
 	});
 
 	pi.on("session_branch", (_event, ctx) => {

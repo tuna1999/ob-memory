@@ -116,6 +116,24 @@ describe("ledger fold and projections", () => {
 		const projection = fullProjection([...base, dangling]);
 		expect(projection.observations).toHaveLength(0);
 	});
+
+	test("a tombstone recorded against coverage past the cut still applies to the compaction", () => {
+		const observation = obs("dddddddddddd", "User chose Postgres.");
+		const entries = [
+			messageEntry("e1", "user", "Use Postgres."),
+			recorded("e2", [observation], "e1"),
+			messageEntry("e5", "user", "Cut here."),
+			messageEntry("e6", "assistant", "Later."),
+			dropped("e7", [observation.id], "e6"),
+		];
+		const compaction = compactionProjection(entries, "e5");
+		expect(compaction.observations).toHaveLength(0);
+		expect(compaction.droppedObservationIds).toContain(observation.id);
+
+		// A historical projection at the cut must not see the later tombstone.
+		const historical = fullProjection(entries, "e5");
+		expect(historical.observations).toHaveLength(1);
+	});
 });
 
 describe("renderer", () => {
@@ -141,6 +159,19 @@ describe("renderer", () => {
 		const rendered = renderMemory([], [obs("aaaaaaaaaaaa", "x".repeat(500))], { maxTokens: 50 });
 		expect(rendered.text).toBe("");
 		expect(rendered.omittedObservations).toBe(1);
+	});
+
+	test("does not describe a skipped newest record as older", () => {
+		const observations = [
+			obs("000000000001", "short one"),
+			obs("000000000002", "short two"),
+			obs("000000000003", "short three"),
+			obs("000000000004", "z".repeat(2_000)),
+		];
+		const rendered = renderMemory([], observations, { maxTokens: 260 });
+		expect(rendered.omittedObservations).toBeGreaterThan(0);
+		expect(rendered.text).toContain("omitted");
+		expect(rendered.text).not.toContain("older");
 	});
 });
 
@@ -181,6 +212,102 @@ describe("source serialization and chunking", () => {
 		expect(chunk?.sourceEntryIds).toContain("e3");
 		expect(chunk?.coversUpToId).toBe("e3");
 	});
+
+	test("caps entries per chunk and still advances a long tool-result run", () => {
+		const call: LedgerEntry = {
+			type: "message",
+			id: "c0",
+			message: {
+				role: "assistant",
+				content: [makeToolCall("bash", { command: "for i in $(seq 500); do echo $i; done" })],
+				timestamp: Date.now(),
+			},
+		};
+		const results = Array.from({ length: 500 }, (_, index): LedgerEntry => ({
+			type: "message",
+			id: `r${index}`,
+			message: {
+				role: "toolResult",
+				toolName: "bash",
+				toolCallId: "call-1",
+				content: [{ type: "text", text: `result ${index} ${"x".repeat(200)}` }],
+			},
+		}));
+		const entries = [call, ...results];
+		const first = chunkUnobservedEntries(entries, "c0", 12_000);
+		expect(first).toBeDefined();
+		expect(first!.sourceEntryIds.length).toBeLessThan(500);
+		const second = chunkUnobservedEntries(entries, first!.coversUpToId, 12_000);
+		expect(second).toBeDefined();
+		expect(second!.sourceEntryIds.some((id) => first!.sourceEntryIds.includes(id))).toBe(false);
+	});
+
+	test("per-entry truncation keeps a prompt bounded", () => {
+		const serialized = serializeSourceEntries([messageEntry("e1", "user", "x".repeat(5_000))], {
+			perEntryMaxChars: 32,
+		});
+		expect(serialized.text).toContain("truncated");
+		expect(serialized.text.length).toBeLessThan(500);
+		expect(serialized.truncatedSourceEntryIds).toEqual(["e1"]);
+	});
+
+	test("starts after an already-covered tool result instead of looping", () => {
+		const call: LedgerEntry = {
+			type: "message",
+			id: "e1",
+			message: {
+				role: "assistant",
+				content: [makeToolCall("bash", { command: "pwd" })],
+				timestamp: Date.now(),
+			},
+		};
+		const first: LedgerEntry = {
+			type: "message",
+			id: "e2",
+			message: { role: "toolResult", toolName: "bash", toolCallId: "call-1", content: [{ type: "text", text: "a" }] },
+		};
+		const second: LedgerEntry = {
+			type: "message",
+			id: "e3",
+			message: { role: "toolResult", toolName: "bash", toolCallId: "call-2", content: [{ type: "text", text: "b" }] },
+		};
+		const entries = [call, first, second, messageEntry("e4", "user", "next")];
+		const chunk = chunkUnobservedEntries(entries, "e2", 10_000);
+		expect(chunk?.sourceEntryIds).toEqual(["e3", "e4"]);
+		expect(chunk?.coversUpToId).toBe("e4");
+	});
+
+	test("never claims coverage for a tool pair entry dropped from the prompt", () => {
+		const huge = "A".repeat(5_000);
+		const call: LedgerEntry = {
+			type: "message",
+			id: "e2",
+			message: {
+				role: "assistant",
+				content: [makeToolCall("bash", { command: huge })],
+				timestamp: Date.now(),
+			},
+		};
+		const result: LedgerEntry = {
+			type: "message",
+			id: "e3",
+			message: {
+				role: "toolResult",
+				toolName: "bash",
+				toolCallId: "call-1",
+				content: [{ type: "text", text: huge }],
+				isError: false,
+				timestamp: Date.now(),
+			},
+		};
+		const entries = [messageEntry("e1", "user", "run it"), call, result, messageEntry("e4", "user", "next")];
+		const chunk = chunkUnobservedEntries(entries, "e1", 100, estimateTextTokens);
+		expect(chunk).toBeDefined();
+		expect(chunk!.sourceEntryIds).toContain("e3");
+		expect(chunk!.text).toContain("[Source entry id: e3]");
+		expect(chunk!.coversUpToId).toBe(chunk!.sourceEntryIds.at(-1)!);
+		expect(chunk!.truncatedSourceEntryIds).toContain("e2");
+	});
 });
 
 describe("recall", () => {
@@ -198,6 +325,31 @@ describe("recall", () => {
 		const result = recallMemory([], "aaaaaaaaaaaa");
 		expect(result.found).toBe(false);
 		expect(result.text).toContain("No memory record");
+	});
+
+	test("truncates one oversized source entry to the recall budget", () => {
+		const observation = obs("aaaaaaaaaaaa", "User pasted a large log.");
+		const entries = [
+			messageEntry("e1", "user", "x".repeat(20_000)),
+			recorded("e2", [observation], "e1"),
+		];
+		const result = recallMemory(entries, observation.id, { maxSourceTokens: 200 });
+		expect(result.found).toBe(true);
+		expect(result.text).toContain("truncated to fit the input budget");
+		expect(result.text).not.toContain("x".repeat(20_000));
+		expect(estimateTextTokens(result.text)).toBeLessThan(1_000);
+	});
+
+	test("reports source entries omitted by the recall budget", () => {
+		const observation = obs("aaaaaaaaaaaa", "User cited two logs.", ["e1", "e2"]);
+		const entries = [
+			messageEntry("e1", "user", "a".repeat(300)),
+			messageEntry("e2", "assistant", "b".repeat(300)),
+			recorded("e3", [observation], "e2"),
+		];
+		const result = recallMemory(entries, observation.id, { maxSourceTokens: 100 });
+		expect(result.sourceEntryIds).toEqual(["e1"]);
+		expect(result.omittedSourceEntryIds).toEqual(["e2"]);
 	});
 });
 

@@ -57,40 +57,60 @@ function coverageTier(observationId: string, reflections: readonly Reflection[])
 	return count === 1 ? "partial" : "none";
 }
 
+interface BoundedContext {
+	text: string;
+	observationIds: ReadonlySet<string>;
+}
+
 function boundedContext(
 	reflections: readonly Reflection[],
 	observations: readonly Observation[],
 	maxTokens: number,
-): string {
+): BoundedContext {
 	const reflectionLines = reflections.map(reflectionLine);
 	const observationLines = observations.map(
 		(observation) => `${observationLine(observation)} [coverage: ${coverageTier(observation.id, reflections)}]`,
 	);
 	let tokens = estimateTextTokens("CURRENT REFLECTIONS:\nCURRENT OBSERVATIONS:\n(none yet)");
+	// Keep the newest records first: older ones explain less about current work.
 	const selectedReflections: string[] = [];
-	for (const line of reflectionLines) {
+	for (let i = reflectionLines.length - 1; i >= 0; i--) {
+		const line = reflectionLines[i]!;
 		const cost = estimateTextTokens(line) + 1;
-		if (tokens + cost > maxTokens) break;
-		selectedReflections.push(line);
+		if (tokens + cost > maxTokens) continue;
+		selectedReflections.unshift(line);
 		tokens += cost;
 	}
 	const selectedObservations: string[] = [];
+	const observationIds = new Set<string>();
 	for (let i = observationLines.length - 1; i >= 0; i--) {
 		const line = observationLines[i]!;
 		const cost = estimateTextTokens(line) + 1;
 		if (tokens + cost > maxTokens) continue;
 		selectedObservations.unshift(line);
+		observationIds.add(observations[i]!.id);
 		tokens += cost;
 	}
-	return `CURRENT REFLECTIONS:\n${selectedReflections.length > 0 ? selectedReflections.join("\n") : "(none yet)"}\n\nCURRENT OBSERVATIONS:\n${selectedObservations.length > 0 ? selectedObservations.join("\n") : "(none yet)"}`;
+	return {
+		text: `CURRENT REFLECTIONS:\n${selectedReflections.length > 0 ? selectedReflections.join("\n") : "(none yet)"}\n\nCURRENT OBSERVATIONS:\n${selectedObservations.length > 0 ? selectedObservations.join("\n") : "(none yet)"}`,
+		observationIds,
+	};
 }
 
-function normalizeSupportIds(value: unknown, observations: readonly Observation[]): string[] | undefined {
+function reflectionSignature(content: string, supportingObservationIds: readonly string[]): string {
+	return `${content}\u0000${supportingObservationIds.join(",")}`;
+}
+
+function normalizeSupportIds(
+	value: unknown,
+	observations: readonly Observation[],
+	allowedIds: ReadonlySet<string>,
+): string[] | undefined {
 	if (!Array.isArray(value) || value.length === 0) return undefined;
 	const order = new Map(observations.map((observation, index) => [observation.id, index]));
 	const seen = new Set<string>();
 	for (const id of value) {
-		if (typeof id !== "string" || !order.has(id)) return undefined;
+		if (typeof id !== "string" || !allowedIds.has(id) || !order.has(id)) return undefined;
 		seen.add(id);
 	}
 	if (seen.size === 0) return undefined;
@@ -107,6 +127,10 @@ export async function runReflector(options: RunReflectorOptions): Promise<Reflec
 
 	const existing = new Map(priorReflections.map((reflection) => [reflection.id, reflection]));
 	const accepted = new Map<string, Reflection>();
+	const seenSignatures = new Set(
+		priorReflections.map((reflection) => reflectionSignature(reflection.content, reflection.supportingObservationIds)),
+	);
+	const context = boundedContext(priorReflections, observations, runtime.config.workerMemoryMaxTokens);
 	let rejected = 0;
 	let duplicates = 0;
 
@@ -129,16 +153,22 @@ export async function runReflector(options: RunReflectorOptions): Promise<Reflec
 				const record = raw as Record<string, unknown>;
 				const rawContent = typeof record.content === "string" ? normalizeRecordContentStrict(record.content) : undefined;
 				const content = rawContent && runtime.config.redactSecrets ? redactText(rawContent) : rawContent;
-				const supportingObservationIds = normalizeSupportIds(record.supportingObservationIds, observations);
+				const supportingObservationIds = normalizeSupportIds(
+					record.supportingObservationIds,
+					observations,
+					context.observationIds,
+				);
 				if (!content || isLowValueRecordContent(content) || !supportingObservationIds) {
 					rejected++;
 					continue;
 				}
-				const id = hashMemoryId(content, "", supportingObservationIds, new Set([...existing.keys(), ...accepted.keys()]));
-				if (existing.has(id) || accepted.has(id)) {
+				const signature = reflectionSignature(content, supportingObservationIds);
+				if (seenSignatures.has(signature)) {
 					duplicates++;
 					continue;
 				}
+				seenSignatures.add(signature);
+				const id = hashMemoryId(content, "", supportingObservationIds, new Set([...existing.keys(), ...accepted.keys()]));
 				accepted.set(id, {
 					id,
 					content,
@@ -158,7 +188,7 @@ export async function runReflector(options: RunReflectorOptions): Promise<Reflec
 		},
 	};
 
-	const rawUser = `${boundedContext(priorReflections, observations, runtime.config.workerMemoryMaxTokens)}
+	const rawUser = `${context.text}
 
 Crystallize any missing durable facts or patterns into new reflections. If nothing is stable enough, do not call the tool.`;
 	const user = runtime.config.redactSecrets ? redactText(rawUser) : rawUser;

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { estimateTextTokens } from "../src/constants";
 import type { Observation } from "../src/ledger/types";
-import { consolidate } from "../src/workers/trigger";
+import { consolidate, rawTokensSinceCoverage } from "../src/workers/trigger";
 import { makeAssistant, makeHarness, makeToolCall, messageEntry, observationEntry, scriptedComplete, text } from "./helpers";
 
 function observation(): Observation {
@@ -67,6 +67,29 @@ describe("consolidation pipeline", () => {
 		});
 		expect(result.observed).toBe(0);
 		expect(entries.some((entry) => entry.customType === "ob-memory.observations.recorded")).toBe(false);
+	});
+
+	test("drops when the reflection pass finds nothing new", async () => {
+		const { runtime, entries } = makeHarness({
+			observeAfterTokens: 100_000,
+			reflectAfterTokens: 1,
+			observationsPoolMaxTokens: 1,
+			observationsPoolTargetTokens: 1,
+			redactSecrets: false,
+		});
+		const obs = observation();
+		entries.push(messageEntry("e1", "user", "Please use Postgres for this project."));
+		entries.push(observationEntry("e2", [obs], "e1"));
+		const dropCall = makeAssistant([makeToolCall("drop_observations", { ids: [obs.id] })], "toolUse");
+		const result = await consolidate(runtime, "test", {
+			complete: scriptedComplete([
+				makeAssistant([text("nothing durable")]),
+				dropCall,
+				makeAssistant([text("done")]),
+			]),
+		});
+		expect(result.reflected).toBe(0);
+		expect(result.dropped).toBe(1);
 	});
 
 	test("reflects and then drops only after a successful reflection pass", async () => {
@@ -166,5 +189,22 @@ describe("passive mode", () => {
 		expect(manual.observed).toBe(1);
 		const automatic = await consolidate(runtime, "agent_end");
 		expect(automatic.skipped).toBe("passive");
+	});
+});
+
+describe("trigger accounting", () => {
+	test("counts unobserved source that precedes a later compaction", () => {
+		const { runtime, entries } = makeHarness();
+		entries.push(messageEntry("e1", "user", "observed"));
+		entries.push(observationEntry("e2", [observation()], "e1"));
+		entries.push(messageEntry("e3", "user", "unobserved gap before compaction"));
+		entries.push({
+			type: "compaction",
+			id: "e4",
+			timestamp: new Date().toISOString(),
+			summary: "native summary",
+			firstKeptEntryId: "e3",
+		});
+		expect(rawTokensSinceCoverage(entries, runtime)).toBeGreaterThan(0);
 	});
 });

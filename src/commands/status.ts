@@ -13,6 +13,7 @@ import {
 } from "../ledger/fold";
 import { estimateEntryTokens } from "../ledger/serialize";
 import { publicConfig } from "../config";
+import { redactText } from "../security/redact";
 import type { SessionRuntime } from "../runtime";
 
 function ago(value: number | undefined): string {
@@ -58,7 +59,8 @@ export function handleStatus(runtime: SessionRuntime, ctx: ExtensionContext): vo
 		`last error: ${runtime.lastError ? `${runtime.lastError.stage}: ${runtime.lastError.message} (${ago(runtime.lastError.at)})` : "none"}`,
 		`config: ${JSON.stringify(publicConfig(runtime.config))}`,
 	];
-	present(ctx, lines.join("\n"));
+	const text = lines.join("\n");
+	present(ctx, runtime.config.redactSecrets ? redactText(text) : text);
 }
 
 export function handleConfig(runtime: SessionRuntime, ctx: ExtensionContext): void {

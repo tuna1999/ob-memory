@@ -62,7 +62,7 @@ describe("config", () => {
 			join(agentDir, "ob-memory.json"),
 			JSON.stringify({ model: "openai/gpt-5.2", fallbackModel: { provider: "anthropic", id: "claude", thinking: "high" } }),
 		);
-		const loaded = loadConfig({ cwd, agentDir, env: { OB_MEMORY_MODEL: "test/model" } });
+		const loaded = loadConfig({ cwd, agentDir, env: { OB_MEMORY_MODEL: " test/model " } });
 		expect(loaded.config.model).toEqual({ provider: "test", id: "model" });
 		expect(loaded.config.fallbackModel).toEqual({ provider: "anthropic", id: "claude", thinking: "high" });
 	});

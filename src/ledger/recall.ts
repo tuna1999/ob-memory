@@ -1,6 +1,6 @@
 import { estimateTextTokens } from "../constants";
 import { redactText } from "../security/redact";
-import { serializeEntry } from "./serialize";
+import { serializeSourceEntries } from "./serialize";
 import {
 	isObservationsDroppedData,
 	isObservationsRecordedData,
@@ -18,6 +18,7 @@ export interface RecallResult {
 	observationIds: string[];
 	reflectionIds: string[];
 	sourceEntryIds: string[];
+	omittedSourceEntryIds: string[];
 	missingSourceEntryIds: string[];
 	nonSourceEntryIds: string[];
 	missingSupportingObservationIds: string[];
@@ -101,6 +102,7 @@ export function recallMemory(
 			observationIds: [],
 			reflectionIds: [],
 			sourceEntryIds: [],
+			omittedSourceEntryIds: [],
 			missingSourceEntryIds: [],
 			nonSourceEntryIds: [],
 			missingSupportingObservationIds: [],
@@ -195,7 +197,9 @@ export function recallMemory(
 	const includedSourceIds: string[] = [];
 	let sourceTokens = 0;
 	for (const entry of sourceEntries) {
-		const rendered = `[Source entry id: ${entry.id}]\n${serializeEntry(entry)}`;
+		const remaining = Math.max(256, maxSourceTokens - sourceTokens);
+		const rendered = serializeSourceEntries([entry], { maxTokens: remaining }).text;
+		if (!rendered) continue;
 		const tokens = estimateTextTokens(rendered);
 		if (sourceTokens + tokens > maxSourceTokens && includedSourceIds.length > 0) break;
 		sourceChunks.push(rendered);
@@ -205,6 +209,10 @@ export function recallMemory(
 	if (sourceChunks.length > 0) {
 		lines.push("", "Source evidence:", sourceChunks.join("\n\n"));
 	}
+	const includedSourceIdSet = new Set(includedSourceIds);
+	const omittedSourceEntryIds = unique(
+		sourceEntries.map((entry) => entry.id).filter((id) => !includedSourceIdSet.has(id)),
+	);
 	if (missingSourceEntryIds.length > 0) {
 		lines.push("", `Missing source entries: ${unique(missingSourceEntryIds).join(", ")}`);
 	}
@@ -219,14 +227,16 @@ export function recallMemory(
 	}
 
 	const text = lines.join("\n");
+	const redact = options.redact ?? true;
 	return {
 		found: true,
 		kind,
 		memoryId,
-		text: options.redact ? redactText(text) : text,
+		text: redact ? redactText(text) : text,
 		observationIds,
 		reflectionIds,
 		sourceEntryIds: includedSourceIds,
+		omittedSourceEntryIds,
 		missingSourceEntryIds: unique(missingSourceEntryIds),
 		nonSourceEntryIds: unique(nonSourceEntryIds),
 		missingSupportingObservationIds: unique(missingSupportingObservationIds),
@@ -239,6 +249,7 @@ export function recallMemory(
 			observationIds,
 			reflectionIds,
 			sourceEntryIds: includedSourceIds,
+			omittedSourceEntryIds,
 			missingSourceEntryIds: unique(missingSourceEntryIds),
 			nonSourceEntryIds: unique(nonSourceEntryIds),
 			missingSupportingObservationIds: unique(missingSupportingObservationIds),

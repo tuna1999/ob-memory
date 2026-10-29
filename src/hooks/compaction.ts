@@ -20,7 +20,7 @@ import { chunkUnobservedEntries } from "../ledger/serialize";
 import { redactText } from "../security/redact";
 import type { SessionRuntime } from "../runtime";
 import { resolveWorkerModel } from "../workers/model";
-import { observeChunk } from "../workers/trigger";
+import { observeChunk, cancelScheduledConsolidation } from "../workers/trigger";
 import { resolveCompactionCut, type CompactionReason, type CutResolution } from "./cut";
 import {
 	compactionRetainedBudget,
@@ -158,8 +158,10 @@ export async function handleSessionBeforeCompact(
 	event: SessionBeforeCompactEvent,
 	ctx: ExtensionContext,
 ): Promise<SessionBeforeCompactResult | undefined> {
+	cancelScheduledConsolidation(runtime);
 	runtime.updateContext(ctx);
 	const reason = resolveCompactionReason(runtime);
+	if (event.signal.aborted) return undefined;
 	try {
 		if (event.customInstructions?.trim()) {
 			return delegate(runtime, reason, "user focus instructions require native summarization");
@@ -182,8 +184,10 @@ export async function handleSessionBeforeCompact(
 			rangeStartIndex: rangeStart,
 		});
 
+		// Catch up whenever the observer is behind the proposed cut, even when
+		// the initial resolution would delegate because the uncovered tail does
+		// not fit. Catch-up can shrink that tail enough to own the compaction.
 		if (
-			resolution.kind === "cut" &&
 			resolution.gap &&
 			runtime.config.compactionCatchUpMaxChunks > 0 &&
 			!runtime.busy
@@ -204,6 +208,7 @@ export async function handleSessionBeforeCompact(
 				});
 			}
 		}
+		if (event.signal.aborted) return undefined;
 
 		if (resolution.kind === "delegate") {
 			return delegate(runtime, reason, resolution.reason, resolution);

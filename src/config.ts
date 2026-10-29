@@ -46,12 +46,13 @@ function readJsonObject(path: string, warnings: string[]): Record<string, unknow
 function parseModelChoice(value: unknown, key: string, warnings: string[]): ModelChoice | undefined {
 	if (value === undefined || value === null) return undefined;
 	if (typeof value === "string") {
-		const slash = value.indexOf("/");
-		if (slash <= 0 || slash === value.length - 1) {
+		const spec = value.trim();
+		const slash = spec.indexOf("/");
+		if (slash <= 0 || slash === spec.length - 1) {
 			warnings.push(`${key}: expected "provider/id", got ${JSON.stringify(value)}`);
 			return undefined;
 		}
-		return { provider: value.slice(0, slash), id: value.slice(slash + 1) };
+		return { provider: spec.slice(0, slash), id: spec.slice(slash + 1) };
 	}
 	if (typeof value !== "object" || Array.isArray(value)) {
 		warnings.push(`${key}: expected a model object or "provider/id"`);

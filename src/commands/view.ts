@@ -27,10 +27,12 @@ export async function handleView(runtime: SessionRuntime, ctx: ExtensionContext,
 	const full = args.trim().split(/\s+/).includes("full");
 	const projection = full ? fullProjection(entries) : visibleProjection(entries);
 	const maxTokens = Math.max(2_000, Math.min(24_000, runtime.config.compactionSummaryMaxTokens ?? 12_000) * 2);
-	const rendered = renderMemory(projection.reflections, projection.observations, {
-		maxTokens,
-		estimate: runtime.estimator,
-	});
+	const rendered = full
+		? renderMemory(projection.reflections, projection.observations, { estimate: runtime.estimator })
+		: renderMemory(projection.reflections, projection.observations, {
+				maxTokens,
+				estimate: runtime.estimator,
+			});
 	const scope = full ? "full ledger" : "visible memory";
 	const header =
 		`${scope}: ${projection.observations.length} active observations, ${projection.reflections.length} reflections` +

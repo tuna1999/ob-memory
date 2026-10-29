@@ -11,7 +11,6 @@ import {
 	type Reflection,
 } from "../ledger/types";
 import {
-	compactionRangeStartIndex,
 	foldLedger,
 	latestCoverageId,
 	latestCoverageIndex,
@@ -38,9 +37,7 @@ function branchEntries(runtime: SessionRuntime): LedgerEntry[] {
 
 export function rawTokensSinceCoverage(entries: readonly LedgerEntry[], runtime: SessionRuntime): number {
 	const coverageIndex = latestCoverageIndex(entries, OM_OBSERVATIONS_RECORDED);
-	const compactionStart = compactionRangeStartIndex(entries);
-	const start = Math.max(coverageIndex, compactionStart);
-	return rawTokensAfterIndex(entries, start, (entry) => estimateEntryTokens(entry, runtime.estimator));
+	return rawTokensAfterIndex(entries, coverageIndex, (entry) => estimateEntryTokens(entry, runtime.estimator));
 }
 
 export function shouldObserve(entries: readonly LedgerEntry[], runtime: SessionRuntime): boolean {
@@ -53,6 +50,25 @@ export function shouldObserve(entries: readonly LedgerEntry[], runtime: SessionR
 	return coverageId !== backoff.coverageId || raw > backoff.tokensAtEmpty + threshold;
 }
 
+function farthestSourceEntryId(
+	records: readonly Observation[],
+	sourceIds: readonly string[],
+): string | undefined {
+	const order = new Map(sourceIds.map((id, index) => [id, index]));
+	let bestIndex = -1;
+	let bestId: string | undefined;
+	for (const record of records) {
+		for (const id of record.sourceEntryIds) {
+			const index = order.get(id);
+			if (index !== undefined && index > bestIndex) {
+				bestIndex = index;
+				bestId = id;
+			}
+		}
+	}
+	return bestId;
+}
+
 export async function observeChunk(
 	runtime: SessionRuntime,
 	entries: readonly LedgerEntry[],
@@ -62,6 +78,7 @@ export async function observeChunk(
 	complete?: typeof completeSimple,
 ): Promise<Observation[] | undefined> {
 	const fold = foldLedger(entries);
+	let exhausted = false;
 	const records = await runObserver({
 		runtime,
 		resolved,
@@ -69,9 +86,12 @@ export async function observeChunk(
 		observations: fold.activeObservations,
 		chunk: chunk.text,
 		allowedSourceEntryIds: chunk.sourceEntryIds,
-		existingObservationIds: fold.observations.map((observation) => observation.id),
+		existingObservations: fold.observations,
 		signal,
 		complete,
+		onExhausted: () => {
+			exhausted = true;
+		},
 	});
 	if (!records) {
 		runtime.emptyBackoff = {
@@ -80,7 +100,19 @@ export async function observeChunk(
 		};
 		return undefined;
 	}
-	const data = buildObservationsRecordedData(records, chunk.coversUpToId);
+	signal.throwIfAborted();
+	// If maxTurns cut the model off mid-chunk, advance only as far as the
+	// accepted observations actually cite instead of claiming the whole chunk.
+	const coversUpToId = exhausted
+		? (farthestSourceEntryId(records, chunk.sourceEntryIds) ?? chunk.coversUpToId)
+		: chunk.coversUpToId;
+	if (exhausted && coversUpToId !== chunk.coversUpToId) {
+		runtime.debug.record("observer", "partial_coverage", {
+			chunkCoverage: chunk.coversUpToId,
+			coversUpToId,
+		});
+	}
+	const data = buildObservationsRecordedData(records, coversUpToId);
 	if (!data) return undefined;
 	if (!runtime.append(OM_OBSERVATIONS_RECORDED, data)) throw new Error("failed to append observation record");
 	runtime.emptyBackoff = undefined;
@@ -144,6 +176,7 @@ export async function consolidate(
 	}
 
 	const startedAt = Date.now();
+	const errorBeforePass = runtime.lastError;
 	const ran = await runtime.runExclusive("consolidation", async (signal) => {
 		runtime.lastTriggerReason = reason;
 		const resolved = await resolveWorkerModel(runtime.ctx, runtime.config, signal);
@@ -182,11 +215,13 @@ export async function consolidate(
 			reflectionBackoff !== undefined &&
 			reflectionBackoff.coverageId === latestCoverageId(entries, OM_OBSERVATIONS_RECORDED) &&
 			currentActiveTokens <= reflectionBackoff.observationTokens + Math.max(1_000, Math.floor(runtime.config.reflectAfterTokens / 2));
+		let reflectionPassRan = false;
 		if (
 			(options.force || currentActiveTokens >= runtime.config.reflectAfterTokens) &&
 			!reflectionBackoffActive &&
 			currentFold.activeObservations.length > 0
 		) {
+			reflectionPassRan = true;
 			const reflections = await runReflector({
 				runtime,
 				resolved: resolved.value,
@@ -196,6 +231,7 @@ export async function consolidate(
 				complete: options.complete,
 			});
 			if (reflections) {
+				signal.throwIfAborted();
 				const covers = latestCoverageId(entries, OM_OBSERVATIONS_RECORDED) ?? entries[entries.length - 1]?.id;
 				if (covers) result.reflected = await appendReflections(runtime, reflections, covers);
 				runtime.emptyReflectionBackoff = undefined;
@@ -211,7 +247,7 @@ export async function consolidate(
 
 		const afterReflectTokens = observationTokens(currentFold.activeObservations);
 		if (
-			result.reflected > 0 &&
+			(result.reflected > 0 || reflectionPassRan) &&
 			(options.force || afterReflectTokens > runtime.config.observationsPoolMaxTokens) &&
 			currentFold.activeObservations.length > 0
 		) {
@@ -225,6 +261,7 @@ export async function consolidate(
 				complete: options.complete,
 			});
 			if (ids && ids.length > 0) {
+				signal.throwIfAborted();
 				const covers = latestCoverageId(entries, OM_OBSERVATIONS_RECORDED) ?? entries[entries.length - 1]?.id;
 				if (covers) result.dropped = await appendDrops(runtime, ids, covers);
 			}
@@ -232,7 +269,7 @@ export async function consolidate(
 		runtime.noteSuccess();
 	}, { requireIdle: reason === "turn_end" });
 	if (!ran) {
-		return { ...result, skipped: runtime.lastError ? "failed" : "busy" };
+		return { ...result, skipped: runtime.lastError !== errorBeforePass ? "failed" : "busy" };
 	}
 	runtime.debug.record("consolidation", "complete", { ...result, reason, durationMs: Date.now() - startedAt });
 	return result;

@@ -20,7 +20,7 @@ All fields are optional. Defaults are shown.
 | `observeAfterTokens` | positive integer | `6000` | Raw unobserved source tokens that trigger an observer pass. |
 | `reflectAfterTokens` | positive integer | `4000` | Active observation tokens that trigger a reflector pass. |
 | `observerChunkMaxTokens` | positive integer | `12000` | Maximum source chunk sent to one observer request. |
-| `observationsPoolMaxTokens` | positive integer | `16000` | Hard active-observation pool size; the dropper is considered above it. |
+| `observationsPoolMaxTokens` | positive integer | `16000` | Active-observation pool size above which the dropper is considered. |
 | `observationsPoolTargetTokens` | positive integer | `10000` | Soft target used to size dropper candidates. Clamped to the max. |
 | `compactionSummaryMaxTokens` | positive integer | context window / 8, clamped 2k–16k | Rendered memory summary budget. |
 | `compactionMaxRetainedTokens` | positive integer | max(4000, context window / 2) | Maximum raw tail retained when the observer is behind the cut. |
@@ -36,7 +36,7 @@ All fields are optional. Defaults are shown.
 | `ownManualCompaction` | boolean | `true` | Allow custom summaries for `/compact`. |
 | `ownAutoCompaction` | boolean | `true` | Allow custom summaries for threshold/idle/incomplete auto compaction. Overflow recovery always delegates. |
 | `debugLog` | boolean | `false` | Write NDJSON diagnostics to `<agentDir>/ob-memory/debug/<sessionId>.ndjson`. |
-| `showNotifications` | boolean | `true` | Show warnings/status via `ctx.ui.notify` when a UI is available. |
+| `showNotifications` | boolean | `true` | Show automatic warnings (config load, worker failures) via `ctx.ui.notify`. Explicit `/ob-memory` output is always shown. |
 
 ## Environment variables
 

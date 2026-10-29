@@ -119,10 +119,10 @@ export function renderMemory(
 	if (omittedReflections > 0 || omittedObservations > 0) {
 		const omitted: string[] = [];
 		if (omittedReflections > 0) {
-			omitted.push(`${omittedReflections} older reflection${omittedReflections === 1 ? "" : "s"}`);
+			omitted.push(`${omittedReflections} reflection${omittedReflections === 1 ? "" : "s"}`);
 		}
 		if (omittedObservations > 0) {
-			omitted.push(`${omittedObservations} older observation${omittedObservations === 1 ? "" : "s"}`);
+			omitted.push(`${omittedObservations} observation${omittedObservations === 1 ? "" : "s"}`);
 		}
 		parts.push(
 			`(${omitted.join(" and ")} omitted to fit the summary budget; they remain in the session memory ledger, see /ob-memory view full.)`,

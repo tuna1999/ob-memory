@@ -54,9 +54,11 @@ export interface RunObserverOptions {
 	observations: readonly Observation[];
 	chunk: string;
 	allowedSourceEntryIds: readonly string[];
-	existingObservationIds?: readonly string[];
+	existingObservations?: readonly Observation[];
 	signal: AbortSignal;
 	complete?: typeof completeSimple;
+	/** The worker hit maxTurns while still proposing tool calls. */
+	onExhausted?: () => void;
 }
 
 interface RawObservation {
@@ -81,6 +83,12 @@ function normalizeSourceIds(value: unknown, allowed: readonly string[]): string[
 	}
 	if (seen.size === 0) return undefined;
 	return Array.from(seen).sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0));
+}
+
+function observationSignature(
+	observation: Pick<Observation, "content" | "timestamp" | "sourceEntryIds">,
+): string {
+	return `${observation.content}\u0000${observation.timestamp}\u0000${observation.sourceEntryIds.join(",")}`;
 }
 
 function makeRecord(
@@ -132,10 +140,9 @@ export async function runObserver(options: RunObserverOptions): Promise<Observat
 		estimate: runtime.estimator,
 	}).text;
 	const accepted = new Map<string, Observation>();
-	const existingIds = new Set([
-		...observations.map((observation) => observation.id),
-		...(options.existingObservationIds ?? []),
-	]);
+	const allExisting = [...observations, ...(options.existingObservations ?? [])];
+	const existingIds = new Set(allExisting.map((observation) => observation.id));
+	const seenSignatures = new Set(allExisting.map(observationSignature));
 	const currentTime = formatLocalTimestamp();
 	let rejected = 0;
 	let duplicates = 0;
@@ -166,10 +173,12 @@ export async function runObserver(options: RunObserverOptions): Promise<Observat
 					rejected++;
 					continue;
 				}
-				if (accepted.has(result.observation.id) || existingIds.has(result.observation.id)) {
+				const signature = observationSignature(result.observation);
+				if (seenSignatures.has(signature)) {
 					duplicates++;
 					continue;
 				}
+				seenSignatures.add(signature);
 				accepted.set(result.observation.id, result.observation);
 				added++;
 			}
@@ -212,6 +221,13 @@ ${chunk}`;
 		},
 	});
 	for (const item of usage) runtime.debug.usage("observer", resolved.label, item);
+	if (result.exhausted) {
+		options.onExhausted?.();
+		runtime.debug.record("observer", "turn_budget_exhausted", {
+			turns: result.turns,
+			toolCalls: result.toolCallCount,
+		});
+	}
 	const values = Array.from(accepted.values());
 	if (values.length === 0) {
 		if (result.stopReason === "error" || result.stopReason === "aborted") {

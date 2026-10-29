@@ -122,6 +122,11 @@ function project(
 	const observationsById = new Map<string, Observation>();
 	const reflectionsById = new Map<string, Reflection>();
 	const droppedObservationIds = new Set<string>();
+	// A tombstone is a decision about a live observation, not source context.
+	// At the tip every recorded drop applies, even when its coverage watermark
+	// is ahead of the observation boundary (otherwise a drop recorded just
+	// before compaction could be ignored and the observation resurrected).
+	const applyAllDrops = dropsBoundary >= entries.length - 1;
 
 	for (const entry of entries) {
 		if (entry.type !== "custom") continue;
@@ -148,7 +153,7 @@ function project(
 		if (
 			entry.customType === OM_OBSERVATIONS_DROPPED &&
 			isObservationsDroppedData(entry.data) &&
-			isCoveredAtOrBefore(entry.data, indexes, dropsBoundary)
+			(applyAllDrops || isCoveredAtOrBefore(entry.data, indexes, dropsBoundary))
 		) {
 			for (const id of entry.data.observationIds) droppedObservationIds.add(id);
 		}
@@ -187,7 +192,10 @@ export function visibleProjection(entries: readonly LedgerEntry[]): Projection {
 
 export function compactionProjection(entries: readonly LedgerEntry[], firstKeptEntryId: string): CompactionProjection {
 	const boundary = boundaryIndex(entries, firstKeptEntryId);
-	const projection = project(entries, boundary, boundary, boundary);
+	// Observations/reflections fold through the summary cut, but drops are
+	// tombstones: every drop recorded in the journal must apply to the compacted
+	// memory, even if the observer had already covered entries past the cut.
+	const projection = project(entries, boundary, boundary, entries.length - 1);
 	return {
 		...projection,
 		details: {
@@ -239,35 +247,6 @@ export function rawTokensAfterIndex(
 		}
 	}
 	return total;
-}
-
-/** Last compaction boundary, so trigger accounting ignores history already summarized. */
-export function compactionRangeStartIndex(entries: readonly LedgerEntry[]): number {
-	for (let i = entries.length - 1; i >= 0; i--) {
-		if (entries[i]?.type === "compaction") return i;
-	}
-	return -1;
-}
-
-export function unobservedSourceSpanBefore(
-	entries: readonly LedgerEntry[],
-	cutIndex: number,
-	coverageIndex: number,
-): UnobservedSourceSpan | undefined {
-	const entryIds: string[] = [];
-	let firstIndex = -1;
-	let lastIndex = -1;
-	for (let i = Math.max(0, coverageIndex + 1); i < cutIndex; i++) {
-		const entry = entries[i];
-		if (!entry || (entry.type !== "message" && entry.type !== "custom_message" && entry.type !== "branch_summary")) {
-			continue;
-		}
-		if (firstIndex === -1) firstIndex = i;
-		lastIndex = i;
-		entryIds.push(entry.id);
-	}
-	if (firstIndex === -1) return undefined;
-	return { firstIndex, lastIndex, entryCount: entryIds.length, entryIds };
 }
 
 export function observationTokens(observations: readonly Observation[]): number {

@@ -76,4 +76,21 @@ describe("compaction cut", () => {
 		});
 		expect(resolution.kind).toBe("delegate");
 	});
+
+	test("never moves the cut before the latest /clear boundary", () => {
+		const { runtime } = makeHarness({ compactionMaxRetainedTokens: 100_000 });
+		const entries: LedgerEntry[] = [
+			messageEntry("e1", "user", "before clear"),
+			{ type: "reset_boundary", id: "e2", timestamp: new Date().toISOString() },
+			messageEntry("e3", "user", "after clear"),
+			messageEntry("e4", "assistant", "still unobserved"),
+			messageEntry("e5", "user", "cut here"),
+		];
+		const resolution = resolveCompactionCut(entries, "e5", 0, {
+			reason: "manual",
+			runtime,
+			rangeStartIndex: -1,
+		});
+		expect(resolution.kind).toBe("delegate");
+	});
 });

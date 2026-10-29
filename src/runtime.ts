@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { ObMemoryConfig } from "./config-types";
 import { modelLabel } from "./config";
 import { DebugLog } from "./debug-log";
+import { redactText } from "./security/redact";
 import { createTokenEstimator, type TokenEstimator } from "./util/tokens";
 
 export type ManagedTimer = Timer;
@@ -118,7 +119,8 @@ export class SessionRuntime {
 	notify(message: string, type: "info" | "warning" | "error" = "info"): void {
 		if (!this.config.showNotifications || !this.ctx.hasUI) return;
 		try {
-			this.ctx.ui.notify(message, type);
+			const text = this.config.redactSecrets ? redactText(message) : message;
+			this.ctx.ui.notify(text, type);
 		} catch {
 			// Notifications are optional in every mode.
 		}
