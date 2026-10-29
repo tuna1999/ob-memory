@@ -273,6 +273,59 @@ export function loadConfig(options: ConfigLoadOptions): LoadedConfig {
 	return { config, warnings, sources };
 }
 
+export const OBSERVER_CHUNK_CONTEXT_RATIO = 0.2;
+export const OBSERVER_CHUNK_MIN_TOKENS = 256;
+export const OBSERVER_CHUNK_FALLBACK_MAX_TOKENS = 12_000;
+export const WORKER_MEMORY_CONTEXT_RATIO = 0.25;
+export const WORKER_MEMORY_MIN_TOKENS = 256;
+export const WORKER_MEMORY_FALLBACK_MAX_TOKENS = 16_000;
+
+function derivedBudget(
+	explicit: number | undefined,
+	contextWindow: number | null | undefined,
+	ratio: number,
+	minimum: number,
+	fallback: number,
+): number {
+	if (explicit !== undefined) return explicit;
+	if (typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0) {
+		return Math.max(minimum, Math.floor(contextWindow * ratio));
+	}
+	return fallback;
+}
+
+/**
+ * Source chunk sent to one observer request. The default scales with the
+ * resolved memory model so large windows are not underused and small windows
+ * leave room for the prompt and output. Explicit config always wins.
+ */
+export function resolveObserverChunkMaxTokens(
+	config: Pick<ObMemoryConfig, "observerChunkMaxTokens">,
+	contextWindow?: number | null,
+): number {
+	return derivedBudget(
+		config.observerChunkMaxTokens,
+		contextWindow,
+		OBSERVER_CHUNK_CONTEXT_RATIO,
+		OBSERVER_CHUNK_MIN_TOKENS,
+		OBSERVER_CHUNK_FALLBACK_MAX_TOKENS,
+	);
+}
+
+/** Prior memory attached to one worker request; same derivation policy as the chunk cap. */
+export function resolveWorkerMemoryMaxTokens(
+	config: Pick<ObMemoryConfig, "workerMemoryMaxTokens">,
+	contextWindow?: number | null,
+): number {
+	return derivedBudget(
+		config.workerMemoryMaxTokens,
+		contextWindow,
+		WORKER_MEMORY_CONTEXT_RATIO,
+		WORKER_MEMORY_MIN_TOKENS,
+		WORKER_MEMORY_FALLBACK_MAX_TOKENS,
+	);
+}
+
 export function modelLabel(model: ModelChoice | undefined): string {
 	return model ? `${model.provider}/${model.id}` : "session model";
 }

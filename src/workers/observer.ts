@@ -10,6 +10,7 @@ import type { SessionRuntime } from "../runtime";
 import { runWorkerLoop, type WorkerToolResult } from "./loop";
 import type { ResolvedWorkerModel } from "./model";
 import { OBSERVER_SYSTEM } from "./prompts";
+import { resolveWorkerMemoryMaxTokens } from "../config";
 
 const OBSERVATIONS_SCHEMA: TJsonSchema = {
 	type: "object",
@@ -136,7 +137,7 @@ function makeRecord(
 export async function runObserver(options: RunObserverOptions): Promise<Observation[] | undefined> {
 	const { runtime, resolved, reflections, observations, chunk, allowedSourceEntryIds, signal } = options;
 	const priorMemory = renderMemory(reflections, observations, {
-		maxTokens: runtime.config.workerMemoryMaxTokens,
+		maxTokens: resolveWorkerMemoryMaxTokens(runtime.config, resolved.model.contextWindow),
 		estimate: runtime.estimator,
 	}).text;
 	const accepted = new Map<string, Observation>();

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0
+
+- `observerChunkMaxTokens` and `workerMemoryMaxTokens` are now optional and default to 20% / 25% of the resolved memory model context window (minimum 256; `12000` / `16000` when the window is unknown). Explicit values still win, and a smaller `fallbackModel` window caps both budgets.
+- Observer due detection now also uses provider-reported context growth since the latest observation coverage or compaction anchor. `/ob-memory status` reports that provider clock separately; before the first coverage and when no trustworthy baseline exists, the raw token estimate remains authoritative.
+- Compaction now folds memory through the observation coverage marker when the observer is ahead of omp's retention boundary. Observations recorded past the cut are no longer dropped from the summary, which previously forced a native fallback.
+
 ## 0.2.0
 
 - `/ob-memory` now offers argument completions in the TUI: subcommands on the first token, `view full` once a tail prefix is typed, and `passive on|off` immediately.

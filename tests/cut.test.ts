@@ -57,6 +57,27 @@ describe("compaction cut", () => {
 		}
 	});
 
+	test("folds through coverage when the observer is ahead of the cut", () => {
+		const { runtime } = makeHarness();
+		const entries: LedgerEntry[] = [
+			messageEntry("e1", "user", "one"),
+			messageEntry("e2", "assistant", "two"),
+			messageEntry("e3", "user", "three"),
+			messageEntry("e4", "assistant", "cut here"),
+			messageEntry("e5", "user", "already observed"),
+		];
+		const resolution = resolveCompactionCut(entries, "e4", 4, {
+			reason: "manual",
+			runtime,
+			rangeStartIndex: -1,
+		});
+		expect(resolution.kind).toBe("cut");
+		if (resolution.kind === "cut") {
+			expect(resolution.firstKeptEntryId).toBe("e4");
+			expect(resolution.foldThroughEntryId).toBe("e5");
+		}
+	});
+
 	test("delegates when the cut cannot be retained safely", () => {
 		const { runtime } = makeHarness({ compactionMaxRetainedTokens: 1 });
 		const resolution = resolveCompactionCut(toolEntries(), "e4", 0, {

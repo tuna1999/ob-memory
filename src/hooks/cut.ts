@@ -81,7 +81,11 @@ export function resolveCompactionCut(
 	if (coverageIndex < 0) return { kind: "delegate", reason: "no observation coverage" };
 	const lastSource = lastSourceIndexBefore(entries, cutIndex);
 	if (lastSource === -1 || coverageIndex >= lastSource) {
-		const foldThrough = entries[cutIndex]?.id;
+		// Coverage can run past Pi's cut. Fold through the coverage marker, not
+		// the cut: observations recorded against entries after the cut still
+		// describe real context and must reach the summary. The retained source
+		// is redundant with them, never lost.
+		const foldThrough = entries[coverageIndex]?.id ?? entries[cutIndex]?.id;
 		if (!foldThrough) return { kind: "delegate", reason: "cut entry missing" };
 		return { kind: "cut", firstKeptEntryId, foldThroughEntryId: foldThrough };
 	}

@@ -6,6 +6,7 @@ import type { SessionRuntime } from "../runtime";
 import { runWorkerLoop, type WorkerToolResult } from "./loop";
 import type { ResolvedWorkerModel } from "./model";
 import { DROPPER_SYSTEM } from "./prompts";
+import { resolveWorkerMemoryMaxTokens } from "../config";
 
 const DROP_SCHEMA: TJsonSchema = {
 	type: "object",
@@ -132,7 +133,11 @@ export async function runDropper(options: RunDropperOptions): Promise<string[] |
 	const metrics = observationPoolMetrics(observations, targetTokens);
 	if (metrics.maxDropsAllowed <= 0) return undefined;
 
-	const context = boundedContext(reflections, observations, runtime.config.workerMemoryMaxTokens);
+	const context = boundedContext(
+		reflections,
+		observations,
+		resolveWorkerMemoryMaxTokens(runtime.config, resolved.model.contextWindow),
+	);
 	if (context.observations.length === 0) return undefined;
 	const allowed = new Map(context.observations.map((observation) => [observation.id, observation]));
 	const selected = new Set<string>();

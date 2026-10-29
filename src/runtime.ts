@@ -156,6 +156,17 @@ export class SessionRuntime {
 		}
 	}
 
+	/** Provider-reported context size, or undefined when the host cannot measure it. */
+	contextTokens(): number | undefined {
+		try {
+			const usage = typeof this.ctx.getContextUsage === "function" ? this.ctx.getContextUsage() : undefined;
+			const tokens = usage?.tokens;
+			return typeof tokens === "number" && Number.isFinite(tokens) && tokens >= 0 ? tokens : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
 	/**
 	 * Run one consolidation/compaction pass at a time. Returning false is a
 	 * normal scheduling outcome, not an error; the next trigger will retry.

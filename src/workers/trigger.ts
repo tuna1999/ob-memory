@@ -18,6 +18,8 @@ import {
 	rawTokensAfterIndex,
 } from "../ledger/fold";
 import { chunkUnobservedEntries, estimateEntryTokens, type SourceChunk } from "../ledger/serialize";
+import { realTokensSinceObservationCoverage } from "../ledger/usage";
+import { resolveObserverChunkMaxTokens } from "../config";
 import type { SessionRuntime } from "../runtime";
 import { runDropper } from "./dropper";
 import { resolveWorkerModel, type ResolvedWorkerModel } from "./model";
@@ -40,14 +42,34 @@ export function rawTokensSinceCoverage(entries: readonly LedgerEntry[], runtime:
 	return rawTokensAfterIndex(entries, coverageIndex, (entry) => estimateEntryTokens(entry, runtime.estimator));
 }
 
-export function shouldObserve(entries: readonly LedgerEntry[], runtime: SessionRuntime): boolean {
+/** Provider-reported context growth since the latest observation anchor, when measurable. */
+export function providerTokensSinceCoverage(
+	entries: readonly LedgerEntry[],
+	runtime: SessionRuntime,
+): number | undefined {
+	return realTokensSinceObservationCoverage(entries, runtime.contextTokens());
+}
+
+/**
+ * Observer progress: the larger of the raw uncovered-source estimate and
+ * provider-reported context growth. The provider clock catches content the
+ * character heuristic undercounts, while the raw backlog keeps progress moving
+ * when provider usage is unavailable or coverage lags a compaction.
+ */
+export function observeProgress(entries: readonly LedgerEntry[], runtime: SessionRuntime): number {
 	const raw = rawTokensSinceCoverage(entries, runtime);
-	if (raw < runtime.config.observeAfterTokens) return false;
+	const provider = providerTokensSinceCoverage(entries, runtime);
+	return provider !== undefined ? Math.max(raw, provider) : raw;
+}
+
+export function shouldObserve(entries: readonly LedgerEntry[], runtime: SessionRuntime): boolean {
+	const progress = observeProgress(entries, runtime);
+	if (progress < runtime.config.observeAfterTokens) return false;
 	const backoff = runtime.emptyBackoff;
 	if (!backoff) return true;
 	const coverageId = latestCoverageId(entries, OM_OBSERVATIONS_RECORDED);
 	const threshold = Math.max(1_000, Math.floor(runtime.config.observeAfterTokens / 2));
-	return coverageId !== backoff.coverageId || raw > backoff.tokensAtEmpty + threshold;
+	return coverageId !== backoff.coverageId || progress > backoff.tokensAtEmpty + threshold;
 }
 
 function farthestSourceEntryId(
@@ -96,7 +118,7 @@ export async function observeChunk(
 	if (!records) {
 		runtime.emptyBackoff = {
 			coverageId: latestCoverageId(entries, OM_OBSERVATIONS_RECORDED),
-			tokensAtEmpty: rawTokensSinceCoverage(entries, runtime),
+			tokensAtEmpty: observeProgress(entries, runtime),
 		};
 		return undefined;
 	}
@@ -192,10 +214,14 @@ export async function consolidate(
 
 		entries = branchEntries(runtime);
 		const coverageId = latestCoverageId(entries, OM_OBSERVATIONS_RECORDED);
+		const chunkMaxTokens = resolveObserverChunkMaxTokens(
+			runtime.config,
+			resolved.value.model.contextWindow,
+		);
 		const chunk = chunkUnobservedEntries(
 			entries,
 			coverageId,
-			runtime.config.observerChunkMaxTokens,
+			chunkMaxTokens,
 			runtime.estimator,
 			{ observeAttachments: runtime.config.observeAttachments },
 		);

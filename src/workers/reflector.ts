@@ -8,6 +8,7 @@ import type { SessionRuntime } from "../runtime";
 import { runWorkerLoop, type WorkerToolResult } from "./loop";
 import type { ResolvedWorkerModel } from "./model";
 import { REFLECTOR_SYSTEM } from "./prompts";
+import { resolveWorkerMemoryMaxTokens } from "../config";
 
 const REFLECTIONS_SCHEMA: TJsonSchema = {
 	type: "object",
@@ -130,7 +131,11 @@ export async function runReflector(options: RunReflectorOptions): Promise<Reflec
 	const seenSignatures = new Set(
 		priorReflections.map((reflection) => reflectionSignature(reflection.content, reflection.supportingObservationIds)),
 	);
-	const context = boundedContext(priorReflections, observations, runtime.config.workerMemoryMaxTokens);
+	const context = boundedContext(
+		priorReflections,
+		observations,
+		resolveWorkerMemoryMaxTokens(runtime.config, resolved.model.contextWindow),
+	);
 	let rejected = 0;
 	let duplicates = 0;
 

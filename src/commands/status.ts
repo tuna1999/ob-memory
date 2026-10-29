@@ -12,6 +12,7 @@ import {
 	visibleProjection,
 } from "../ledger/fold";
 import { estimateEntryTokens } from "../ledger/serialize";
+import { realTokensSinceObservationCoverage } from "../ledger/usage";
 import { publicConfig } from "../config";
 import { redactText } from "../security/redact";
 import type { SessionRuntime } from "../runtime";
@@ -41,6 +42,17 @@ export function handleStatus(runtime: SessionRuntime, ctx: ExtensionContext): vo
 	const rawUnobserved = rawTokensAfterIndex(entries, Math.max(observationCoverage, -1), (entry) =>
 		estimateEntryTokens(entry, runtime.estimator),
 	);
+	const currentContextTokens = runtime.contextTokens();
+	const providerDelta = realTokensSinceObservationCoverage(entries, currentContextTokens);
+	const hasCompaction = entries.some((entry) => entry.type === "compaction");
+	const providerLine =
+		currentContextTokens === undefined
+			? "provider context: unavailable"
+			: observationCoverage < 0 && !hasCompaction
+				? `provider context: ~${currentContextTokens.toLocaleString()} tokens now; no observation coverage yet`
+				: providerDelta === undefined
+					? `provider context: ~${currentContextTokens.toLocaleString()} tokens now; delta since the latest memory anchor unavailable`
+					: `provider context: ~${currentContextTokens.toLocaleString()} tokens now; ~${providerDelta.toLocaleString()} since the latest memory anchor`;
 	const activeTokens = observationTokens(fold.activeObservations);
 	const visibleIds = new Set(visible.observations.map((observation) => observation.id));
 	const visibleReflectionIds = new Set(visible.reflections.map((reflection) => reflection.id));
@@ -52,6 +64,7 @@ export function handleStatus(runtime: SessionRuntime, ctx: ExtensionContext): vo
 		`enabled: ${runtime.config.enabled} | passive: ${runtime.config.passive} | busy: ${runtime.busy} | idle: ${runtime.isIdle()}`,
 		`records: ${fold.observations.length} observations, ${fold.activeObservations.length} active, ${fold.droppedObservationIds.size} dropped; ${fold.reflections.length} reflections`,
 		`tokens: active observations ~${activeTokens.toLocaleString()} / max ${runtime.config.observationsPoolMaxTokens.toLocaleString()} (target ${runtime.config.observationsPoolTargetTokens.toLocaleString()}); unobserved source ~${rawUnobserved.toLocaleString()}`,
+		providerLine,
 		`coverage: observations OBM ${latestCoverageId(entries, OM_OBSERVATIONS_RECORDED) ?? "none"}; reflections ${latestCoverageId(entries, OM_REFLECTIONS_RECORDED) ?? "none"}`,
 		`visible projection: ${visible.observations.length} observations, ${visible.reflections.length} reflections; drift +${onlyFullObservations} observations / +${onlyFullReflections} reflections only in full ledger`,
 		`last: observer ${ago(runtime.lastObserverAt)}; reflector ${ago(runtime.lastReflectorAt)}; dropper ${ago(runtime.lastDropperAt)}; compaction ${ago(runtime.lastCompactionAt)}`,

@@ -10,6 +10,12 @@ All fields are optional. Defaults are shown.
 
 `agentDir` is omp's active agent directory (`~/.omp/agent` by default; profiles and `PI_CODING_AGENT_DIR` are respected). Later sources override earlier ones. Invalid values warn and fall back to the previous valid value.
 
+## Observer due clock
+
+The observer runs when either the raw unobserved-source estimate or provider-reported context growth since the latest observation coverage (or compaction anchor) reaches `observeAfterTokens`. The provider clock catches content the character heuristic undercounts.
+
+Before the first observation coverage and without a compaction, only the raw estimate is used: provider context at that point includes the system prompt and tools, which are not unobserved conversation. After the first coverage, `/ob-memory status` shows the provider delta separately.
+
 ## Fields
 
 | Key | Type | Default | Meaning |
@@ -19,14 +25,14 @@ All fields are optional. Defaults are shown.
 | `fallbackModel` | same | unset | Used only when the primary worker model cannot be resolved or authenticated. |
 | `observeAfterTokens` | positive integer | `6000` | Raw unobserved source tokens that trigger an observer pass. |
 | `reflectAfterTokens` | positive integer | `4000` | Active observation tokens that trigger a reflector pass. |
-| `observerChunkMaxTokens` | positive integer | `12000` | Maximum source chunk sent to one observer request. |
+| `observerChunkMaxTokens` | positive integer | derived: 20% of the resolved worker model context window, minimum 256; `12000` when unknown | Maximum source chunk sent to one observer request. |
 | `observationsPoolMaxTokens` | positive integer | `16000` | Active-observation pool size above which the dropper is considered. |
 | `observationsPoolTargetTokens` | positive integer | `10000` | Soft target used to size dropper candidates. Clamped to the max. |
 | `compactionSummaryMaxTokens` | positive integer | context window / 8, clamped 2k–16k | Rendered memory summary budget. |
 | `compactionMaxRetainedTokens` | positive integer | max(4000, context window / 2) | Maximum raw tail retained when the observer is behind the cut. |
 | `compactionCatchUpMaxChunks` | non-negative integer | `2` | Observer chunks attempted synchronously inside `session_before_compact`. `0` disables catch-up. |
 | `compactionCatchUpBudgetMs` | non-negative integer | `18000` | Wall-clock budget for synchronous catch-up. Keep below omp's 30s handler budget. |
-| `workerMemoryMaxTokens` | positive integer | `16000` | Prior memory attached to one worker request. |
+| `workerMemoryMaxTokens` | positive integer | derived: 25% of the resolved worker model context window, minimum 256; `16000` when unknown | Prior memory attached to one worker request. |
 | `agentMaxTurns` | positive integer | `8` | Maximum assistant turns in one worker tool loop. |
 | `agentMaxTokens` | positive integer | `4096` | Maximum worker output tokens per request. |
 | `consolidateWhenIdle` | boolean | `true` | Suppress `turn_end` consolidation while the agent is not idle. Terminal `agent_end`, session start, and manual runs are still allowed. |
@@ -61,6 +67,14 @@ Boolean env vars accept `true/false`, `1/0`, `yes/no`, `on/off`.
 - `{ "provider": "...", "id": "...", "thinking": "off|minimal|low|medium|high|xhigh|max" }`
 
 `thinking` is a hint; models without reasoning support simply omit it. Worker calls are capped by both `agentMaxTokens` and the model's catalog output cap.
+
+## Derived worker budgets
+
+`observerChunkMaxTokens` and `workerMemoryMaxTokens` are resolved per consolidation pass from the worker model actually selected for that pass — the configured `model`, the session model, or `fallbackModel` after a resolution failure. A fallback with a smaller context window therefore also shrinks the chunk and prior-memory caps, so a retry is never handed a prompt sized only for the larger primary.
+
+Explicit values always win. When the model advertises no context window, the plugin keeps conservative fallbacks (`12000` for the chunk, `16000` for prior memory). The minimum of `256` prevents a tiny advertised window from producing a request that cannot carry source labels, an omission marker, and useful context.
+
+These budgets do not resize `agentMaxTokens`. On a very small context window, lower `agentMaxTokens` explicitly so the system prompt, source chunk, prior memory, and output all fit.
 
 ## Compaction budgets
 

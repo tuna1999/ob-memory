@@ -14,8 +14,8 @@ export interface ObMemoryConfig {
 	observeAfterTokens: number;
 	/** Run the reflector when active observations reach this many tokens. */
 	reflectAfterTokens: number;
-	/** Maximum size of one source chunk sent to the observer. */
-	observerChunkMaxTokens: number;
+	/** Maximum size of one source chunk sent to the observer. Unset derives from the resolved worker model. */
+	observerChunkMaxTokens?: number;
 	/** Active-observation pool size above which the dropper is considered. */
 	observationsPoolMaxTokens: number;
 	/** Soft active-observation target used by the dropper. */
@@ -28,8 +28,8 @@ export interface ObMemoryConfig {
 	compactionCatchUpMaxChunks: number;
 	/** Wall-clock budget for synchronous catch-up inside session_before_compact. */
 	compactionCatchUpBudgetMs: number;
-	/** Maximum prior memory sent with one worker request. */
-	workerMemoryMaxTokens: number;
+	/** Maximum prior memory sent with one worker request. Unset derives from the resolved worker model. */
+	workerMemoryMaxTokens?: number;
 	/** Maximum assistant turns in one worker tool loop. */
 	agentMaxTurns: number;
 	/** Maximum output tokens for one worker request. */
@@ -53,12 +53,10 @@ export const DEFAULT_CONFIG: ObMemoryConfig = {
 	enabled: true,
 	observeAfterTokens: 6_000,
 	reflectAfterTokens: 4_000,
-	observerChunkMaxTokens: 12_000,
 	observationsPoolMaxTokens: 16_000,
 	observationsPoolTargetTokens: 10_000,
 	compactionCatchUpMaxChunks: 2,
 	compactionCatchUpBudgetMs: 18_000,
-	workerMemoryMaxTokens: 16_000,
 	agentMaxTurns: 8,
 	agentMaxTokens: 4_096,
 	consolidateWhenIdle: true,

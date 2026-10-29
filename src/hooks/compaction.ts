@@ -17,6 +17,7 @@ import {
 } from "../ledger/fold";
 import { renderMemory } from "../ledger/render";
 import { chunkUnobservedEntries } from "../ledger/serialize";
+import { resolveObserverChunkMaxTokens } from "../config";
 import { redactText } from "../security/redact";
 import type { SessionRuntime } from "../runtime";
 import { resolveWorkerModel } from "../workers/model";
@@ -54,12 +55,16 @@ async function catchUp(
 			runtime.noteFailure("compaction.catchup.resolve", model.reason);
 			return;
 		}
+		const chunkMaxTokens = resolveObserverChunkMaxTokens(
+			runtime.config,
+			model.value.model.contextWindow,
+		);
 		for (let i = 0; i < runtime.config.compactionCatchUpMaxChunks; i++) {
 			if (Date.now() >= deadline || combined.aborted) break;
 			const chunk = chunkUnobservedEntries(
 				currentEntries,
 				currentCoverageId,
-				runtime.config.observerChunkMaxTokens,
+				chunkMaxTokens,
 				runtime.estimator,
 				{ observeAttachments: runtime.config.observeAttachments },
 			);

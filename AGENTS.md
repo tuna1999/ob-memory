@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-`ob-memory` is an oh-my-pi (omp) extension that keeps long sessions coherent across compaction. It maintains a branch-local, source-backed memory ledger — observations → reflections → drop tombstones — stored as custom session entries and rendered deterministically into omp's compaction summary. No vector DB, no per-turn retrieval, no second memory store. Version `0.2.0`; MIT, with prompt/architecture attribution to `pi-observational-memory` in `NOTICE`.
+`ob-memory` is an oh-my-pi (omp) extension that keeps long sessions coherent across compaction. It maintains a branch-local, source-backed memory ledger — observations → reflections → drop tombstones — stored as custom session entries and rendered deterministically into omp's compaction summary. No vector DB, no per-turn retrieval, no second memory store. Version `0.3.0`; MIT, with prompt/architecture attribution to `pi-observational-memory` in `NOTICE`.
 
 ## Architecture & Data Flow
 
@@ -26,7 +26,7 @@ Patterns to preserve:
 |---|---|
 | `src/commands/` | `/ob-memory` subcommands (`control.ts`) and presentation (`view.ts`, `status.ts`); argument completions in `completions.ts` |
 | `src/hooks/` | Compaction ownership, cut resolution, policy, fallback injection |
-| `src/ledger/` | Entry types/guards, fold/projections, renderer, serialization/chunking, recall, quality filter |
+|`src/ledger/`|Entry types/guards, fold/projections, provider usage deltas, renderer, serialization/chunking, recall, quality filter|
 | `src/workers/` | Observer/reflector/dropper, worker loop, prompt text, model resolution, consolidation trigger |
 | `src/tools/` | `ob_recall` tool registration |
 | `src/security/` | Secret redaction |
@@ -83,7 +83,7 @@ There is no compile/bundle step, no lint/format config, and no CI: verification 
 
 ## Testing & QA
 
-- Framework: `bun:test` only; 15 files, 81 tests at current HEAD. No coverage collector or thresholds.
+- Framework: `bun:test` only; 16 files, 95 tests at current HEAD. No coverage collector or thresholds.
 - Harness: `makeHarness()` fakes `pi`/`ctx`, `scriptedComplete()` replays canned assistant messages, and `makeModel()` uses `https://example.invalid/v1` — tests never hit the network or a real model.
 - Style: behavioral assertions on returned values and appended ledger entries (no `mock.module`, `spyOn`, or fake timers); frozen timestamps (`2026-10-29T10:00:00Z`); temp dirs via `mkdtempSync` and `rmSync` in `afterEach`; env vars passed explicitly (only `tests/extension.test.ts` mutates `PI_CODING_AGENT_DIR` and restores it).
 - Expectation: changes to ledger, workers, compaction, or config need a regression test in the closest suite; keep tests deterministic and offline.
