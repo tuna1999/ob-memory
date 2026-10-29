@@ -13,4 +13,5 @@ Initial implementation.
 - `ob_recall` exact-id provenance tool.
 - `/ob-memory` view, status, config, passive, and observe-now commands.
 - Config files plus `OB_MEMORY_*` overrides, credential redaction, and optional NDJSON diagnostics.
+- Extension lifecycle metadata reports the package version.
 - Unit/integration tests, extension factory smoke test, and a fold/render benchmark.
