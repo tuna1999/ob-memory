@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.2
 
 - Redaction masks passwords in URL userinfo (`scheme://user:pass@host`, including an empty user) and short values of sensitive keys (`password=abc`).
 - Failure backoff now actually reaches its 5 minute cap instead of stopping at 64 s.

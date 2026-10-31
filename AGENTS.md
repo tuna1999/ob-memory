@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-`ob-memory` is an oh-my-pi (omp) extension that keeps long sessions coherent across compaction. It maintains a branch-local, source-backed memory ledger — observations → reflections → drop tombstones — stored as custom session entries and rendered deterministically into omp's compaction summary. No vector DB, no per-turn retrieval, no second memory store. Version `0.3.1`; MIT, with prompt/architecture attribution to `pi-observational-memory` in `NOTICE`.
+`ob-memory` is an oh-my-pi (omp) extension that keeps long sessions coherent across compaction. It maintains a branch-local, source-backed memory ledger — observations → reflections → drop tombstones — stored as custom session entries and rendered deterministically into omp's compaction summary. No vector DB, no per-turn retrieval, no second memory store. Version `0.3.2`; MIT, with prompt/architecture attribution to `pi-observational-memory` in `NOTICE`.
 
 ## Architecture & Data Flow
 
