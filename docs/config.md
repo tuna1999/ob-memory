@@ -35,7 +35,7 @@ After an empty observer run, the observer also waits for a coverage change or fo
 | `compactionSummaryMaxTokens` | positive integer | context window / 8, clamped 2k–16k | Rendered memory summary budget. |
 | `compactionMaxRetainedTokens` | positive integer | max(4000, context window / 2) | Maximum raw tail retained when the observer is behind the cut. |
 | `compactionCatchUpMaxChunks` | non-negative integer | `2` | Observer chunks attempted synchronously inside `session_before_compact`. `0` disables catch-up; values above 8 clamp. |
-| `compactionCatchUpBudgetMs` | non-negative integer | `18000` | Wall-clock budget for synchronous catch-up; values above 25000 clamp. Keep below omp's 30s handler budget. |
+| `compactionCatchUpBudgetMs` | non-negative integer | `18000` | Wall-clock budget for synchronous catch-up, including up to 5s spent preempting a background consolidation that is still running; values above 25000 clamp. Keep below omp's 30s handler budget. |
 | `workerMemoryMaxTokens` | positive integer | derived: 25% of the resolved worker model context window, minimum 256; `16000` when unknown | Prior memory attached to one worker request; explicit values above 1,000,000 clamp. |
 | `agentMaxTurns` | positive integer | `8` | Maximum assistant turns in one worker tool loop; values above 32 clamp. |
 | `agentMaxTokens` | positive integer | `4096` | Maximum worker output tokens per request. |

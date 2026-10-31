@@ -49,6 +49,8 @@ export class SessionRuntime {
 	emptyReflectionBackoff: { coverageId: string | undefined; observationTokens: number } | undefined;
 	readonly #pi: ExtensionAPI;
 	readonly #timers = new Set<ManagedTimer>();
+	/** Resolves after the in-flight exclusive pass has released `busy`. */
+	#activePass: Promise<void> | undefined;
 
 	constructor(pi: ExtensionAPI, ctx: ExtensionContext, config: ObMemoryConfig, agentDir: string) {
 		this.#pi = pi;
@@ -187,6 +189,10 @@ export class SessionRuntime {
 		this.busy = true;
 		this.abortController = new AbortController();
 		const signal = this.abortController.signal;
+		let release!: () => void;
+		this.#activePass = new Promise<void>((resolve) => {
+			release = resolve;
+		});
 		try {
 			await fn(signal);
 			return true;
@@ -196,7 +202,34 @@ export class SessionRuntime {
 		} finally {
 			this.busy = false;
 			this.abortController = undefined;
+			this.#activePass = undefined;
+			release();
 		}
+	}
+
+	/**
+	 * Abort the in-flight exclusive pass and wait, at most `timeoutMs`, for it
+	 * to release the lock. Returns true when no pass holds the lock afterwards.
+	 * An aborted pass does not count as a failure, so no backoff is applied.
+	 */
+	async preempt(reason: string, timeoutMs: number): Promise<boolean> {
+		const pass = this.#activePass;
+		if (!this.busy || !pass) return !this.busy;
+		this.abort(reason);
+		if (timeoutMs > 0) {
+			let timer: ManagedTimer | undefined;
+			const timeout = new Promise<void>((resolve) => {
+				timer = this.ctx.setTimeout(() => resolve(), timeoutMs);
+			});
+			try {
+				await Promise.race([pass, timeout]);
+			} finally {
+				if (timer) this.clearTimer(timer);
+			}
+		}
+		const settled = !this.busy;
+		this.debug.record("runtime", settled ? "preempted" : "preempt_timeout", { reason, timeoutMs });
+		return settled;
 	}
 
 	abort(reason: string): void {

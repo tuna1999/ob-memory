@@ -4,7 +4,15 @@ import { handleSessionBeforeCompact } from "../src/hooks/compaction";
 import { handleSessionCompacting } from "../src/hooks/compacting";
 import type { LedgerEntry } from "../src/ledger/types";
 import { estimateTextTokens } from "../src/constants";
-import { makeHarness, messageEntry, observationEntry } from "./helpers";
+import {
+	makeAssistant,
+	makeHarness,
+	makeToolCall,
+	messageEntry,
+	observationEntry,
+	scriptedComplete,
+	text,
+} from "./helpers";
 
 function sourceEntries(): LedgerEntry[] {
 	return [
@@ -193,5 +201,95 @@ describe("user focus", () => {
 			ctx,
 		);
 		expect(result).toBeUndefined();
+	});
+});
+
+describe("compaction catch-up", () => {
+	function gapEntries(): LedgerEntry[] {
+		return [
+			...sourceEntries(),
+			observationEntry("e5", [observation("aaaaaaaaaaaa", "e2")], "e2"),
+			messageEntry("e6", "user", "Keep this tail."),
+		];
+	}
+
+	function catchUpModel() {
+		return scriptedComplete([
+			makeAssistant(
+				[
+					makeToolCall("record_observations", {
+						observations: [
+							{
+								timestamp: "2026-10-29 10:00",
+								content: "User asked to add a migrations folder.",
+								relevance: "high",
+								sourceEntryIds: ["e3"],
+							},
+						],
+					}),
+				],
+				"toolUse",
+			),
+			makeAssistant([text("done")]),
+		]);
+	}
+
+	test("observes the gap and then owns the proposed cut", async () => {
+		const { runtime, ctx, entries } = makeHarness({ compactionMaxRetainedTokens: 0 });
+		entries.push(...gapEntries());
+		const result = await handleSessionBeforeCompact(runtime, event([...entries], "e6"), ctx, {
+			complete: catchUpModel(),
+		});
+		expect(result?.compaction?.firstKeptEntryId).toBe("e6");
+		expect(result?.compaction?.summary).toContain("migrations folder");
+	});
+
+	test("preempts a background pass instead of skipping catch-up", async () => {
+		const { runtime, ctx, entries } = makeHarness({ compactionMaxRetainedTokens: 0 });
+		entries.push(...gapEntries());
+		let backgroundAborted = false;
+		const background = runtime.runExclusive(
+			"consolidation",
+			(signal) =>
+				new Promise<void>((_resolve, reject) => {
+					signal.addEventListener("abort", () => {
+						backgroundAborted = true;
+						reject(signal.reason);
+					});
+				}),
+			{ requireIdle: false },
+		);
+		const result = await handleSessionBeforeCompact(runtime, event([...entries], "e6"), ctx, {
+			complete: catchUpModel(),
+		});
+		expect(backgroundAborted).toBe(true);
+		expect(await background).toBe(false);
+		expect(runtime.isFailureBackoffActive()).toBe(false);
+		expect(result?.compaction?.firstKeptEntryId).toBe("e6");
+		expect(result?.compaction?.summary).toContain("migrations folder");
+	});
+
+	test("does not hang when a background pass ignores abort", async () => {
+		const { runtime, ctx, entries } = makeHarness({
+			compactionMaxRetainedTokens: 100_000,
+			compactionCatchUpBudgetMs: 50,
+		});
+		entries.push(...gapEntries());
+		let finish!: () => void;
+		const background = runtime.runExclusive(
+			"consolidation",
+			() => new Promise<void>((resolve) => (finish = resolve)),
+			{ requireIdle: false },
+		);
+		const started = Date.now();
+		const result = await handleSessionBeforeCompact(runtime, event([...entries], "e6"), ctx, {
+			complete: catchUpModel(),
+		});
+		expect(Date.now() - started).toBeLessThan(1_000);
+		// No catch-up ran, so the unobserved tail is retained instead of lost.
+		expect(result?.compaction?.firstKeptEntryId).not.toBe("e6");
+		expect(result?.compaction?.summary).not.toContain("migrations folder");
+		finish();
+		await background;
 	});
 });

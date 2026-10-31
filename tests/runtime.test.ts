@@ -68,4 +68,43 @@ describe("session runtime", () => {
 		runtime.noteSuccess();
 		expect(runtime.isFailureBackoffActive()).toBe(false);
 	});
+
+	test("preempt aborts the in-flight pass and waits for it to release the lock", async () => {
+		const { runtime } = makeHarness();
+		let sawAbort = false;
+		const pass = runtime.runExclusive(
+			"background",
+			(signal) =>
+				new Promise<void>((_resolve, reject) => {
+					signal.addEventListener("abort", () => {
+						sawAbort = true;
+						reject(signal.reason);
+					});
+				}),
+			{ requireIdle: false },
+		);
+		expect(runtime.busy).toBe(true);
+		expect(await runtime.preempt("test", 1_000)).toBe(true);
+		expect(sawAbort).toBe(true);
+		expect(runtime.busy).toBe(false);
+		expect(await pass).toBe(false);
+		expect(runtime.isFailureBackoffActive()).toBe(false);
+	});
+
+	test("preempt gives up after its timeout when the pass ignores abort", async () => {
+		const { runtime } = makeHarness();
+		let finish!: () => void;
+		const pass = runtime.runExclusive(
+			"stubborn",
+			() => new Promise<void>((resolve) => (finish = resolve)),
+			{ requireIdle: false },
+		);
+		const started = Date.now();
+		expect(await runtime.preempt("test", 30)).toBe(false);
+		expect(Date.now() - started).toBeLessThan(1_000);
+		expect(runtime.busy).toBe(true);
+		finish();
+		await pass;
+		expect(await runtime.preempt("idle", 30)).toBe(true);
+	});
 });

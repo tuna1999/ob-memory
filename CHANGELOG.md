@@ -4,6 +4,7 @@
 
 - Redaction masks passwords in URL userinfo (`scheme://user:pass@host`, including an empty user) and short values of sensitive keys (`password=abc`).
 - Failure backoff now actually reaches its 5 minute cap instead of stopping at 64 s.
+- Compaction catch-up preempts an in-flight background consolidation (bounded wait inside the catch-up budget) instead of skipping catch-up while that pass keeps calling the worker model and appending entries.
 - Documented that the dropper may run after a reflection pass that produced nothing; its local guards still protect critical and uncovered high records.
 
 ## 0.3.1

@@ -126,7 +126,7 @@ Tool:
 - `ownManualCompaction` / `ownAutoCompaction` permits it;
 - the observer's `coversUpToId` reaches every source entry that would be summarized.
 
-If the observer is behind the proposed cut, the plugin first tries a bounded synchronous catch-up (`compactionCatchUpMaxChunks`, `compactionCatchUpBudgetMs`). If that is not enough, it either:
+If the observer is behind the proposed cut, the plugin first tries a bounded synchronous catch-up (`compactionCatchUpMaxChunks`, `compactionCatchUpBudgetMs`), aborting any background consolidation that is still running so it does not skip catch-up. If that is not enough, it either:
 
 - moves the cut back to retain the unobserved tail, subject to `compactionMaxRetainedTokens`, or
 - delegates to omp's native summarizer.

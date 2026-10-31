@@ -5,6 +5,7 @@ import type {
 	SessionBeforeCompactResult,
 } from "@oh-my-pi/pi-coding-agent";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
+import type { completeSimple } from "@oh-my-pi/pi-ai";
 import {
 	OM_OBSERVATIONS_RECORDED,
 	type LedgerEntry,
@@ -32,6 +33,9 @@ import {
 	shouldOwnCompaction,
 } from "./policy";
 
+/** Upper bound on waiting for an aborted background pass to release the lock. */
+const COMPACTION_PREEMPT_WAIT_MS = 5_000;
+
 interface CatchUpOutcome {
 	chunks: number;
 	entries: LedgerEntry[];
@@ -43,12 +47,13 @@ async function catchUp(
 	event: SessionBeforeCompactEvent,
 	entries: LedgerEntry[],
 	coverageId: string | undefined,
+	deadline: number,
+	complete?: typeof completeSimple,
 ): Promise<CatchUpOutcome> {
 	let chunks = 0;
 	let currentEntries = entries;
 	let currentCoverageId = coverageId;
-	const deadline = Date.now() + runtime.config.compactionCatchUpBudgetMs;
-	if (runtime.config.compactionCatchUpBudgetMs <= 0) {
+	if (Date.now() >= deadline) {
 		return {
 			chunks,
 			entries: currentEntries,
@@ -84,7 +89,7 @@ async function catchUp(
 			const chunkSignal = AbortSignal.any([combined, AbortSignal.timeout(remaining)]);
 			let records;
 			try {
-				records = await observeChunk(runtime, currentEntries, model.value, chunk, chunkSignal);
+				records = await observeChunk(runtime, currentEntries, model.value, chunk, chunkSignal, complete);
 			} catch (error) {
 				if (chunkSignal.aborted) break;
 				throw error;
@@ -181,6 +186,7 @@ export async function handleSessionBeforeCompact(
 	runtime: SessionRuntime,
 	event: SessionBeforeCompactEvent,
 	ctx: ExtensionContext,
+	options: { complete?: typeof completeSimple } = {},
 ): Promise<SessionBeforeCompactResult | undefined> {
 	cancelScheduledConsolidation(runtime);
 	runtime.updateContext(ctx);
@@ -211,25 +217,42 @@ export async function handleSessionBeforeCompact(
 		// Catch up whenever the observer is behind the proposed cut, even when
 		// the initial resolution would delegate because the uncovered tail does
 		// not fit. Catch-up can shrink that tail enough to own the compaction.
-		if (
-			resolution.gap &&
-			runtime.config.compactionCatchUpMaxChunks > 0 &&
-			!runtime.busy
-		) {
-			const catchUpResult = await catchUp(
-				runtime,
-				event,
-				entries,
-				latestCoverageId(entries, OM_OBSERVATIONS_RECORDED),
-			);
-			if (catchUpResult.chunks > 0) {
-				entries = catchUpResult.entries;
-				coverageIndex = catchUpResult.coverageIndex;
+		const catchUpBudgetMs = runtime.config.compactionCatchUpBudgetMs;
+		if (resolution.gap && runtime.config.compactionCatchUpMaxChunks > 0 && catchUpBudgetMs > 0) {
+			// One wall-clock budget covers waiting for a background pass and
+			// the catch-up itself.
+			const deadline = Date.now() + catchUpBudgetMs;
+			const resolveFrom = (next: LedgerEntry[]): void => {
+				entries = next;
+				coverageIndex = latestCoverageIndex(entries, OM_OBSERVATIONS_RECORDED);
 				resolution = resolveCompactionCut(entries, event.preparation.firstKeptEntryId, coverageIndex, {
 					reason,
 					runtime,
 					rangeStartIndex: rangeStart,
 				});
+			};
+			// A background consolidation would otherwise make catch-up skip
+			// entirely and keep calling the worker model and appending ledger
+			// entries while the summary is built. Preempt it; whatever it
+			// already appended is picked up by re-reading the branch.
+			if (runtime.busy) {
+				const settled = await runtime.preempt(
+					"compaction",
+					Math.min(COMPACTION_PREEMPT_WAIT_MS, catchUpBudgetMs),
+				);
+				if (settled) resolveFrom(runtime.ctx.sessionManager.getBranch() as LedgerEntry[]);
+				else runtime.debug.record("compaction", "catchup_skipped_busy");
+			}
+			if (resolution.gap && !runtime.busy && !event.signal.aborted) {
+				const catchUpResult = await catchUp(
+					runtime,
+					event,
+					entries,
+					latestCoverageId(entries, OM_OBSERVATIONS_RECORDED),
+					deadline,
+					options.complete,
+				);
+				if (catchUpResult.chunks > 0) resolveFrom(catchUpResult.entries);
 			}
 		}
 		if (event.signal.aborted) return undefined;

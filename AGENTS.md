@@ -16,6 +16,7 @@ Patterns to preserve:
 
 - Model output supplies content only; ids, timestamps, token counts, and source ids are computed locally.
 - `signal.throwIfAborted()` before any append; `append` returns `false` once disposed.
+- Compaction catch-up preempts a busy background pass via `runtime.preempt()` (bounded wait); never run a second worker pass concurrently.
 - Coverage watermarks may not exceed the last sent source entry; partial coverage advances only through cited ids.
 - Drops are tombstones applied at the tip, never deletions of history.
 - Redaction (`security/redact.ts`) wraps worker input, rendered output, notifications, logs, and recall.
@@ -83,7 +84,7 @@ There is no compile/bundle step, no lint/format config, and no CI: verification 
 
 ## Testing & QA
 
-- Framework: `bun:test` only; 17 files, 107 tests at current HEAD. No coverage collector or thresholds.
+- Framework: `bun:test` only; 17 files, 112 tests at current HEAD. No coverage collector or thresholds.
 - Harness: `makeHarness()` fakes `pi`/`ctx`, `scriptedComplete()` replays canned assistant messages, and `makeModel()` uses `https://example.invalid/v1` — tests never hit the network or a real model.
 - Style: behavioral assertions on returned values and appended ledger entries (no `mock.module`, `spyOn`, or fake timers); frozen timestamps (`2026-10-29T10:00:00Z`); temp dirs via `mkdtempSync` and `rmSync` in `afterEach`; env vars passed explicitly (only `tests/extension.test.ts` mutates `PI_CODING_AGENT_DIR` and restores it).
 - Expectation: changes to ledger, workers, compaction, or config need a regression test in the closest suite; keep tests deterministic and offline.
