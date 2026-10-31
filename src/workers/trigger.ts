@@ -166,7 +166,12 @@ async function appendDrops(runtime: SessionRuntime, ids: string[], coversUpToId:
 
 /**
  * One consolidation pass: observe the oldest unobserved chunk, reflect when the
- * active pool justifies it, then drop only after a successful reflection pass.
+ * active pool justifies it, then drop when the pool is still over budget.
+ * The dropper runs after any reflection pass that ran without throwing, even
+ * one that produced no reflections: otherwise an over-budget pool of
+ * low/medium records nothing can be reflected about would grow without bound.
+ * Safety comes from the dropper's local guards (critical is never dropped,
+ * high needs reflection coverage), and drops stay recallable via `ob_recall`.
  * All appends happen after validation; a failed model call advances nothing.
  */
 export async function consolidate(

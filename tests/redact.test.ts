@@ -61,4 +61,26 @@ describe("redaction", () => {
 		expect(value.tokenCount).toBe(42);
 		expect((value.observations as Array<Record<string, unknown>>)[0]?.tokenCount).toBe(7);
 	});
+
+	test("redacts URL userinfo passwords and keeps the rest of the URL", () => {
+		const redacted = redactText(
+			"DATABASE_URL_HOST postgres://admin:hunter2pass@db:5432/app and redis://:s3cr3t@cache:6379",
+		);
+		expect(redacted).not.toContain("hunter2pass");
+		expect(redacted).not.toContain("s3cr3t");
+		expect(redacted).toContain("postgres://admin:[REDACTED]@db:5432/app");
+		expect(redacted).toContain("@cache:6379");
+	});
+
+	test("redacts short values of sensitive keys", () => {
+		const redacted = redactText("password=abc pwd: x1 token=42");
+		expect(redacted).not.toContain("abc");
+		expect(redacted).not.toContain("x1");
+		expect(redacted).not.toMatch(/token=42/);
+	});
+
+	test("does not redact URLs without credentials or non-sensitive short values", () => {
+		const text = "see https://example.com/path?q=1 and http://localhost:8080 with tokenCount: 42 port=80";
+		expect(redactText(text)).toBe(text);
+	});
 });

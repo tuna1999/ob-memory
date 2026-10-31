@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { makeHarness } from "./helpers";
 import { consolidate } from "../src/workers/trigger";
+import { MAX_FAILURE_BACKOFF_MS } from "../src/runtime";
 
 describe("session runtime", () => {
 	test("runs one pass at a time and rejects overlap", async () => {
@@ -49,5 +50,22 @@ describe("session runtime", () => {
 		expect(result.skipped).toBe("busy");
 		gate.resolve();
 		await holder;
+	});
+
+	test("failure backoff doubles and reaches the 5 minute cap", () => {
+		const { runtime } = makeHarness();
+		const delays: number[] = [];
+		for (let i = 0; i < 12; i++) {
+			const before = Date.now();
+			runtime.noteFailure("test", new Error("boom"));
+			delays.push(runtime.failureBackoffUntil - before);
+		}
+		expect(delays[0]).toBeGreaterThanOrEqual(2_000);
+		expect(delays[0]).toBeLessThan(3_000);
+		expect(delays[7]).toBeLessThan(MAX_FAILURE_BACKOFF_MS);
+		expect(delays[8]).toBeGreaterThanOrEqual(MAX_FAILURE_BACKOFF_MS - 50);
+		expect(delays[11]).toBeLessThanOrEqual(MAX_FAILURE_BACKOFF_MS + 50);
+		runtime.noteSuccess();
+		expect(runtime.isFailureBackoffActive()).toBe(false);
 	});
 });

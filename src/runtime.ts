@@ -7,6 +7,8 @@ import { createTokenEstimator, type TokenEstimator } from "./util/tokens";
 
 export type ManagedTimer = Timer;
 
+export const MAX_FAILURE_BACKOFF_MS = 5 * 60_000;
+
 export interface RuntimeError {
 	stage: string;
 	message: string;
@@ -134,7 +136,8 @@ export class SessionRuntime {
 
 	noteFailure(stage: string, error: unknown): void {
 		this.failureCount++;
-		const delay = Math.min(5 * 60_000, 2 ** Math.min(this.failureCount, 6) * 1_000);
+		// 2s, 4s, … doubling up to the 5 minute cap (reached at the 9th failure).
+		const delay = Math.min(MAX_FAILURE_BACKOFF_MS, 2 ** Math.min(this.failureCount, 16) * 1_000);
 		this.failureBackoffUntil = Date.now() + delay;
 		this.recordError(stage, error);
 	}

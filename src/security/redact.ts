@@ -16,6 +16,8 @@ const PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
 	[/\bAIza[0-9A-Za-z_-]{30,}\b/g, "[REDACTED GOOGLE KEY]"],
 	[/\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, "[REDACTED SLACK TOKEN]"],
 	[/\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi, "Bearer [REDACTED]"],
+	// URL userinfo passwords: `postgres://user:pass@host`. Keeps scheme, user, and host.
+	[/\b([a-z][a-z0-9+.-]*:\/\/[^\s:/?#@]*):[^\s/?#@]+@/gi, "$1:[REDACTED]@"],
 ];
 
 const SENSITIVE_KEY_PATTERN =
@@ -24,8 +26,9 @@ const SENSITIVE_KEY_PATTERN =
 // Match `KEY=value`/`Key: "value"` assignments, then decide in JS whether the
 // key is sensitive. Keeping the key bounded avoids the catastrophic
 // backtracking a broad `[\w-]*keyword[\w-]*` regex causes on long tokens.
+// Values have no minimum length: a short password is still a password.
 const ASSIGNMENT_PATTERN =
-	/["']?\b([A-Za-z0-9_.-]{1,64})\b["']?\s*[=:]\s*(?:"[^"]*"|'[^']*'|[^\s"',;}]{4,})/g;
+	/["']?\b([A-Za-z0-9_.-]{1,64})\b["']?\s*[=:]\s*(?:"[^"]*"|'[^']*'|[^\s"',;}]+)/g;
 
 export function redactText(text: string): string {
 	let result = text;

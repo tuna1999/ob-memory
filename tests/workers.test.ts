@@ -5,10 +5,19 @@ import { runDropper } from "../src/workers/dropper";
 import type { ResolvedWorkerModel } from "../src/workers/model";
 import { runObserver } from "../src/workers/observer";
 import { runReflector } from "../src/workers/reflector";
-import { observeChunk } from "../src/workers/trigger";
+import { consolidate, observeChunk } from "../src/workers/trigger";
 import { chunkUnobservedEntries } from "../src/ledger/serialize";
 import { estimateTextTokens } from "../src/constants";
-import { makeAssistant, makeHarness, makeModel, makeToolCall, messageEntry, scriptedComplete, text } from "./helpers";
+import {
+	makeAssistant,
+	makeHarness,
+	makeModel,
+	makeToolCall,
+	messageEntry,
+	observationEntry,
+	scriptedComplete,
+	text,
+} from "./helpers";
 
 const resolved: ResolvedWorkerModel = {
 	model: makeModel(),
@@ -371,6 +380,33 @@ describe("dropper", () => {
 		expect(prompt).toContain(oldest.id);
 		expect(prompt).not.toContain(newest.id);
 		expect(prompt).toContain("1 newer observation omitted");
+	});
+
+	test("drops over-budget uncovered records after an empty reflection pass, never high ones", async () => {
+		const { runtime, entries } = makeHarness({
+			redactSecrets: false,
+			observeAfterTokens: 1_000_000,
+			reflectAfterTokens: 1,
+			observationsPoolMaxTokens: 1,
+			observationsPoolTargetTokens: 1,
+		});
+		const low = { ...observation("aaaaaaaaaaaa", "User mentioned the office coffee machine."), relevance: "low" as const };
+		const high = { ...observation("bbbbbbbbbbbb", "User chose Postgres for the ledger store."), relevance: "high" as const };
+		entries.push(messageEntry("e1", "user", "Use Postgres."));
+		entries.push(observationEntry("e2", [low, high], "e1"));
+		const result = await consolidate(runtime, "test", {
+			complete: scriptedComplete([
+				// Reflector: nothing durable to reflect.
+				makeAssistant([text("nothing to reflect")]),
+				// Dropper: proposes both; only the uncovered low record is accepted.
+				makeAssistant([makeToolCall("drop_observations", { ids: [low.id, high.id] })], "toolUse"),
+				makeAssistant([text("done")]),
+			]),
+		});
+		expect(result.reflected).toBe(0);
+		expect(result.dropped).toBe(1);
+		const drop = entries.find((entry) => entry.customType === "ob-memory.observations.dropped");
+		expect((drop?.data as { observationIds: string[] }).observationIds).toEqual([low.id]);
 	});
 });
 

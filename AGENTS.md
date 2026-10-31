@@ -83,7 +83,7 @@ There is no compile/bundle step, no lint/format config, and no CI: verification 
 
 ## Testing & QA
 
-- Framework: `bun:test` only; 17 files, 102 tests at current HEAD. No coverage collector or thresholds.
+- Framework: `bun:test` only; 17 files, 107 tests at current HEAD. No coverage collector or thresholds.
 - Harness: `makeHarness()` fakes `pi`/`ctx`, `scriptedComplete()` replays canned assistant messages, and `makeModel()` uses `https://example.invalid/v1` — tests never hit the network or a real model.
 - Style: behavioral assertions on returned values and appended ledger entries (no `mock.module`, `spyOn`, or fake timers); frozen timestamps (`2026-10-29T10:00:00Z`); temp dirs via `mkdtempSync` and `rmSync` in `afterEach`; env vars passed explicitly (only `tests/extension.test.ts` mutates `PI_CODING_AGENT_DIR` and restores it).
 - Expectation: changes to ledger, workers, compaction, or config need a regression test in the closest suite; keep tests deterministic and offline.
