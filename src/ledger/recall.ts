@@ -1,5 +1,6 @@
 import { estimateTextTokens } from "../constants";
 import { redactText } from "../security/redact";
+import { reflectionSurvivesReset, resetView, type ResetView } from "./fold";
 import { serializeSourceEntries } from "./serialize";
 import {
 	isObservationsDroppedData,
@@ -22,6 +23,12 @@ export interface RecallResult {
 	missingSourceEntryIds: string[];
 	nonSourceEntryIds: string[];
 	missingSupportingObservationIds: string[];
+	/** Supporting observations cleared by the latest `/clear`; never shown. */
+	clearedSupportingObservationIds: string[];
+	/** Cited source entries at or before the latest `/clear`; never shown. */
+	clearedSourceEntryIds: string[];
+	/** True when the id exists only in records cleared by the latest `/clear`. */
+	cleared?: boolean;
 	collision: boolean;
 	partial: boolean;
 	details: Record<string, unknown>;
@@ -39,27 +46,50 @@ interface IndexedReflection {
 	recordIndex: number;
 }
 
-function indexLedger(entries: readonly LedgerEntry[]): {
+/**
+ * Index recallable records. Records cleared by the latest `/clear` (see
+ * `ResetView` in fold.ts) are kept out: recall output goes to the model, and
+ * cleared conversation must not re-enter its context. Their ids are returned
+ * so recall can say why an id is not available.
+ */
+function indexLedger(entries: readonly LedgerEntry[], reset: ResetView): {
 	observations: IndexedObservation[];
 	reflections: IndexedReflection[];
 	dropped: Set<string>;
+	clearedObservationIds: Set<string>;
+	clearedReflectionIds: Set<string>;
 } {
 	const observations: IndexedObservation[] = [];
-	const reflections: IndexedReflection[] = [];
+	const candidates: IndexedReflection[] = [];
 	const dropped = new Set<string>();
-	for (const entry of entries) {
+	const clearedObservationIds = new Set<string>();
+	const clearedReflectionIds = new Set<string>();
+	for (let index = 0; index < entries.length; index++) {
+		const entry = entries[index]!;
 		if (entry.type !== "custom") continue;
 		if (entry.customType === "ob-memory.observations.recorded") {
 			if (!isObservationsRecordedData(entry.data)) continue;
+			const keepsRecord = reset.keepsRecord(index, entry.data);
 			for (let i = 0; i < entry.data.observations.length; i++) {
-				observations.push({ observation: entry.data.observations[i]!, entryId: entry.id, recordIndex: i });
+				const observation = entry.data.observations[i]!;
+				if (!keepsRecord || !reset.keepsObservation(observation)) {
+					clearedObservationIds.add(observation.id);
+					continue;
+				}
+				observations.push({ observation, entryId: entry.id, recordIndex: i });
 			}
 			continue;
 		}
 		if (entry.customType === "ob-memory.reflections.recorded") {
 			if (!isReflectionsRecordedData(entry.data)) continue;
+			const keepsRecord = reset.keepsRecord(index, entry.data);
 			for (let i = 0; i < entry.data.reflections.length; i++) {
-				reflections.push({ reflection: entry.data.reflections[i]!, entryId: entry.id, recordIndex: i });
+				const reflection = entry.data.reflections[i]!;
+				if (!keepsRecord) {
+					clearedReflectionIds.add(reflection.id);
+					continue;
+				}
+				candidates.push({ reflection, entryId: entry.id, recordIndex: i });
 			}
 			continue;
 		}
@@ -68,7 +98,13 @@ function indexLedger(entries: readonly LedgerEntry[]): {
 			for (const id of entry.data.observationIds) dropped.add(id);
 		}
 	}
-	return { observations, reflections, dropped };
+	const keptObservationIds = new Set(observations.map((item) => item.observation.id));
+	const reflections = candidates.filter((item) => {
+		if (reflectionSurvivesReset(item.reflection, clearedObservationIds, keptObservationIds)) return true;
+		clearedReflectionIds.add(item.reflection.id);
+		return false;
+	});
+	return { observations, reflections, dropped, clearedObservationIds, clearedReflectionIds };
 }
 
 function unique<T>(values: readonly T[]): T[] {
@@ -91,14 +127,18 @@ export function recallMemory(
 	memoryId: string,
 	options: RecallOptions = {},
 ): RecallResult {
-	const { observations, reflections, dropped } = indexLedger(entries);
+	const reset = resetView(entries);
+	const { observations, reflections, dropped, clearedObservationIds, clearedReflectionIds } = indexLedger(entries, reset);
 	const directObservations = observations.filter((item) => item.observation.id === memoryId);
 	const directReflections = reflections.filter((item) => item.reflection.id === memoryId);
 	if (directObservations.length === 0 && directReflections.length === 0) {
+		const cleared = clearedObservationIds.has(memoryId) || clearedReflectionIds.has(memoryId);
 		return {
 			found: false,
 			memoryId,
-			text: `No memory record with id ${memoryId}. Use /ob-memory view or /ob-memory view full to list ids.`,
+			text: cleared
+				? `Memory ${memoryId} describes conversation that was cleared with /clear. It stays in the session ledger for audit (/ob-memory view full) but is not recalled into context.`
+				: `No memory record with id ${memoryId}. Use /ob-memory view or /ob-memory view full to list ids.`,
 			observationIds: [],
 			reflectionIds: [],
 			sourceEntryIds: [],
@@ -106,9 +146,12 @@ export function recallMemory(
 			missingSourceEntryIds: [],
 			nonSourceEntryIds: [],
 			missingSupportingObservationIds: [],
+			clearedSupportingObservationIds: [],
+			clearedSourceEntryIds: [],
+			...(cleared ? { cleared: true } : {}),
 			collision: false,
 			partial: false,
-			details: { memoryId, found: false },
+			details: { memoryId, found: false, ...(cleared ? { cleared: true } : {}) },
 		};
 	}
 
@@ -120,6 +163,7 @@ export function recallMemory(
 
 	const selectedObservations = new Map<string, IndexedObservation>();
 	const missingSupportingObservationIds: string[] = [];
+	const clearedSupportingObservationIds: string[] = [];
 	const addObservation = (item: IndexedObservation): void => {
 		selectedObservations.set(item.observation.id, item);
 	};
@@ -128,7 +172,8 @@ export function recallMemory(
 		for (const id of unique(reflection.supportingObservationIds)) {
 			const item = observationsById.get(id);
 			if (!item) {
-				missingSupportingObservationIds.push(id);
+				if (clearedObservationIds.has(id)) clearedSupportingObservationIds.push(id);
+				else missingSupportingObservationIds.push(id);
 				continue;
 			}
 			addObservation(item);
@@ -137,12 +182,17 @@ export function recallMemory(
 
 	const missingSourceEntryIds: string[] = [];
 	const nonSourceEntryIds: string[] = [];
+	const clearedSourceEntryIds: string[] = [];
 	const sourceEntries: LedgerEntry[] = [];
 	const sourceIds: string[] = [];
 	for (const { observation } of selectedObservations.values()) {
 		for (const id of observation.sourceEntryIds) {
 			if (sourceIds.includes(id)) continue;
 			sourceIds.push(id);
+			if (reset.isClearedEntry(id)) {
+				clearedSourceEntryIds.push(id);
+				continue;
+			}
 			const entry = entriesById.get(id) ?? options.lookupEntry?.(id);
 			if (!entry) {
 				missingSourceEntryIds.push(id);
@@ -158,14 +208,22 @@ export function recallMemory(
 
 	const observationIds = Array.from(selectedObservations.keys());
 	const reflectionIds = directReflections.map((item) => item.reflection.id);
+	// "mixed" means the id itself matched both an observation and a
+	// reflection; a reflection's supporting observations do not count.
 	const kind =
-		observationIds.length > 0 && reflectionIds.length > 0
+		directObservations.length > 0 && directReflections.length > 0
 			? "mixed"
-			: reflectionIds.length > 0
+			: directReflections.length > 0
 				? "reflection"
 				: "observation";
 	const collision = directObservations.length + directReflections.length > 1;
-	const partial = missingSourceEntryIds.length > 0 || nonSourceEntryIds.length > 0 || missingSupportingObservationIds.length > 0;
+	const partial =
+		missingSourceEntryIds.length > 0 ||
+		nonSourceEntryIds.length > 0 ||
+		missingSupportingObservationIds.length > 0 ||
+		clearedSupportingObservationIds.length > 0 ||
+		clearedSourceEntryIds.length > 0;
+	const redact = options.redact ?? true;
 
 	const lines: string[] = [`Memory ${memoryId} (${kind})`];
 	if (directObservations.length > 0) {
@@ -198,7 +256,9 @@ export function recallMemory(
 	let sourceTokens = 0;
 	for (const entry of sourceEntries) {
 		const remaining = Math.max(256, maxSourceTokens - sourceTokens);
-		const rendered = serializeSourceEntries([entry], { maxTokens: remaining }).text;
+		// Redact each source before it is truncated to the budget, so a cut
+		// cannot split a secret into halves the patterns no longer match.
+		const rendered = serializeSourceEntries([entry], { maxTokens: remaining, redact }).text;
 		if (!rendered) continue;
 		const tokens = estimateTextTokens(rendered);
 		if (sourceTokens + tokens > maxSourceTokens && includedSourceIds.length > 0) break;
@@ -222,12 +282,17 @@ export function recallMemory(
 	if (missingSupportingObservationIds.length > 0) {
 		lines.push("", `Missing supporting observations: ${unique(missingSupportingObservationIds).join(", ")}`);
 	}
+	if (clearedSupportingObservationIds.length > 0) {
+		lines.push("", `Supporting observations cleared with /clear (not shown): ${unique(clearedSupportingObservationIds).join(", ")}`);
+	}
+	if (clearedSourceEntryIds.length > 0) {
+		lines.push("", `Source entries cleared with /clear (not shown): ${unique(clearedSourceEntryIds).join(", ")}`);
+	}
 	if (sourceEntries.length > includedSourceIds.length) {
 		lines.push("", `(${sourceEntries.length - includedSourceIds.length} more source entries omitted to fit the recall budget.)`);
 	}
 
 	const text = lines.join("\n");
-	const redact = options.redact ?? true;
 	return {
 		found: true,
 		kind,
@@ -240,6 +305,8 @@ export function recallMemory(
 		missingSourceEntryIds: unique(missingSourceEntryIds),
 		nonSourceEntryIds: unique(nonSourceEntryIds),
 		missingSupportingObservationIds: unique(missingSupportingObservationIds),
+		clearedSupportingObservationIds: unique(clearedSupportingObservationIds),
+		clearedSourceEntryIds: unique(clearedSourceEntryIds),
 		collision,
 		partial,
 		details: {
@@ -253,6 +320,8 @@ export function recallMemory(
 			missingSourceEntryIds: unique(missingSourceEntryIds),
 			nonSourceEntryIds: unique(nonSourceEntryIds),
 			missingSupportingObservationIds: unique(missingSupportingObservationIds),
+			clearedSupportingObservationIds: unique(clearedSupportingObservationIds),
+			clearedSourceEntryIds: unique(clearedSourceEntryIds),
 			collision,
 			partial,
 		},

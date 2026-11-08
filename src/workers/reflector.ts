@@ -1,11 +1,11 @@
 import { completeSimple, type TJsonSchema } from "@oh-my-pi/pi-ai";
-import { estimateTextTokens } from "../constants";
+import { WORKER_OBSERVATIONS_MIN_SHARE, estimateTextTokens } from "../constants";
 import { hashMemoryId, normalizeRecordContentStrict } from "../util/ids";
 import { observationLine, reflectionLine, type Observation, type Reflection } from "../ledger/types";
 import { isLowValueRecordContent } from "../ledger/quality";
 import { redactText } from "../security/redact";
 import type { SessionRuntime } from "../runtime";
-import { runWorkerLoop, type WorkerToolResult } from "./loop";
+import { formatRejections, runWorkerLoop, type WorkerToolResult } from "./loop";
 import type { ResolvedWorkerModel } from "./model";
 import { REFLECTOR_SYSTEM } from "./prompts";
 import { resolveWorkerMemoryMaxTokens } from "../config";
@@ -63,6 +63,25 @@ interface BoundedContext {
 	observationIds: ReadonlySet<string>;
 }
 
+/** Newest-first selection within `budget`; a line that does not fit is skipped, not a stop marker. */
+function selectNewestWithinBudget(lines: readonly string[], budget: number): { indexes: number[]; tokens: number } {
+	const indexes: number[] = [];
+	let tokens = 0;
+	for (let i = lines.length - 1; i >= 0; i--) {
+		const cost = estimateTextTokens(lines[i]!) + 1;
+		if (tokens + cost > budget) continue;
+		indexes.unshift(i);
+		tokens += cost;
+	}
+	return { indexes, tokens };
+}
+
+/**
+ * Fit reflections and observations into `maxTokens`. Observations are the
+ * records the reflector cites, so they keep at least
+ * WORKER_OBSERVATIONS_MIN_SHARE of the budget; reflections take the rest and
+ * either side reclaims what the other leaves unused. Newest records win.
+ */
 function boundedContext(
 	reflections: readonly Reflection[],
 	observations: readonly Observation[],
@@ -72,26 +91,16 @@ function boundedContext(
 	const observationLines = observations.map(
 		(observation) => `${observationLine(observation)} [coverage: ${coverageTier(observation.id, reflections)}]`,
 	);
-	let tokens = estimateTextTokens("CURRENT REFLECTIONS:\nCURRENT OBSERVATIONS:\n(none yet)");
-	// Keep the newest records first: older ones explain less about current work.
-	const selectedReflections: string[] = [];
-	for (let i = reflectionLines.length - 1; i >= 0; i--) {
-		const line = reflectionLines[i]!;
-		const cost = estimateTextTokens(line) + 1;
-		if (tokens + cost > maxTokens) continue;
-		selectedReflections.unshift(line);
-		tokens += cost;
-	}
-	const selectedObservations: string[] = [];
-	const observationIds = new Set<string>();
-	for (let i = observationLines.length - 1; i >= 0; i--) {
-		const line = observationLines[i]!;
-		const cost = estimateTextTokens(line) + 1;
-		if (tokens + cost > maxTokens) continue;
-		selectedObservations.unshift(line);
-		observationIds.add(observations[i]!.id);
-		tokens += cost;
-	}
+	const available = Math.max(
+		0,
+		maxTokens - estimateTextTokens("CURRENT REFLECTIONS:\nCURRENT OBSERVATIONS:\n(none yet)"),
+	);
+	const reserved = selectNewestWithinBudget(observationLines, Math.floor(available * WORKER_OBSERVATIONS_MIN_SHARE));
+	const pickedReflections = selectNewestWithinBudget(reflectionLines, available - reserved.tokens);
+	const pickedObservations = selectNewestWithinBudget(observationLines, available - pickedReflections.tokens);
+	const selectedReflections = pickedReflections.indexes.map((index) => reflectionLines[index]!);
+	const selectedObservations = pickedObservations.indexes.map((index) => observationLines[index]!);
+	const observationIds = new Set(pickedObservations.indexes.map((index) => observations[index]!.id));
 	return {
 		text: `CURRENT REFLECTIONS:\n${selectedReflections.length > 0 ? selectedReflections.join("\n") : "(none yet)"}\n\nCURRENT OBSERVATIONS:\n${selectedObservations.length > 0 ? selectedObservations.join("\n") : "(none yet)"}`,
 		observationIds,
@@ -136,8 +145,9 @@ export async function runReflector(options: RunReflectorOptions): Promise<Reflec
 		observations,
 		resolveWorkerMemoryMaxTokens(runtime.config, resolved.model.contextWindow),
 	);
-	let rejected = 0;
-	let duplicates = 0;
+	// Run totals feed diagnostics; each tool result reports only its own call.
+	let runRejected = 0;
+	let runDuplicates = 0;
 
 	const tool = {
 		name: "record_reflections",
@@ -147,24 +157,45 @@ export async function runReflector(options: RunReflectorOptions): Promise<Reflec
 		execute: async (args: Record<string, unknown>): Promise<WorkerToolResult> => {
 			const rawList = args.reflections;
 			if (!Array.isArray(rawList)) {
-				return { text: "Invalid arguments: reflections must be an array.", isError: true };
+				runRejected++;
+				return {
+					text: "Invalid arguments: reflections must be an array of reflection objects. Nothing was recorded.",
+					isError: true,
+				};
 			}
 			let added = 0;
-			for (const raw of rawList) {
+			let rejected = 0;
+			let duplicates = 0;
+			const reasons: string[] = [];
+			for (let index = 0; index < rawList.length; index++) {
+				const raw: unknown = rawList[index];
+				const label = `#${index + 1}`;
 				if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
 					rejected++;
+					reasons.push(`${label}: not a reflection object`);
 					continue;
 				}
 				const record = raw as Record<string, unknown>;
 				const rawContent = typeof record.content === "string" ? normalizeRecordContentStrict(record.content) : undefined;
 				const content = rawContent && runtime.config.redactSecrets ? redactText(rawContent) : rawContent;
+				if (!content) {
+					rejected++;
+					reasons.push(`${label}: content must be one non-empty line of plain prose`);
+					continue;
+				}
+				if (isLowValueRecordContent(content)) {
+					rejected++;
+					reasons.push(`${label}: content is empty filler`);
+					continue;
+				}
 				const supportingObservationIds = normalizeSupportIds(
 					record.supportingObservationIds,
 					observations,
 					context.observationIds,
 				);
-				if (!content || isLowValueRecordContent(content) || !supportingObservationIds) {
+				if (!supportingObservationIds) {
 					rejected++;
+					reasons.push(`${label}: every supportingObservationIds entry must be an id listed under CURRENT OBSERVATIONS`);
 					continue;
 				}
 				const signature = reflectionSignature(content, supportingObservationIds);
@@ -182,13 +213,17 @@ export async function runReflector(options: RunReflectorOptions): Promise<Reflec
 				});
 				added++;
 			}
+			runRejected += rejected;
+			runDuplicates += duplicates;
+			const nothingAccepted = added === 0 && rejected > 0;
 			return {
 				text:
 					`Recorded ${added} new reflection${added === 1 ? "" : "s"}` +
 					(duplicates > 0 ? ` (${duplicates} duplicate${duplicates === 1 ? "" : "s"} skipped)` : "") +
-					(rejected > 0 ? `; ${rejected} rejected for invalid fields` : "") +
+					(rejected > 0 ? `; ${rejected} rejected: ${formatRejections(reasons)}` : "") +
 					`. Total this run: ${accepted.size}.`,
 				details: { added, duplicates, rejected, total: accepted.size },
+				...(nothingAccepted ? { isError: true } : {}),
 			};
 		},
 	};
@@ -210,12 +245,22 @@ Crystallize any missing durable facts or patterns into new reflections. If nothi
 		tool,
 		signal,
 		sessionId: runtime.sessionId,
+		beforeTurn: runtime.beforePass,
 		complete: options.complete,
 		onUsage: (usage) => runtime.debug.usage("reflector", resolved.label, usage),
+		// A later turn failing must not discard reflections already accepted.
+		keepPartialOnError: () => accepted.size > 0,
 	});
+	if (result.failed) {
+		runtime.debug.record("reflector", "partial_after_error", { turns: result.turns, error: result.errorMessage });
+	}
 	const values = Array.from(accepted.values());
 	if (values.length === 0) {
-		runtime.debug.record("reflector", "empty", { toolCalls: result.toolCallCount, rejected, duplicates });
+		runtime.debug.record("reflector", "empty", {
+			toolCalls: result.toolCallCount,
+			rejected: runRejected,
+			duplicates: runDuplicates,
+		});
 		return undefined;
 	}
 	runtime.debug.record("reflector", "recorded", { count: values.length, turns: result.turns });

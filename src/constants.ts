@@ -1,5 +1,5 @@
 export const EXTENSION_NAME = "ob-memory";
-export const EXTENSION_VERSION = "0.3.2";
+export const EXTENSION_VERSION = "0.4.0";
 
 export const OM_OBSERVATIONS_RECORDED = "ob-memory.observations.recorded";
 export const OM_REFLECTIONS_RECORDED = "ob-memory.reflections.recorded";
@@ -15,6 +15,13 @@ export const OBSERVATION_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/;
 
 export const MAX_RECORD_CONTENT_CHARS = 2_000;
 export const MAX_SOURCE_ENTRY_CHARS = 40_000;
+
+/**
+ * Minimum share of a reflector/dropper memory budget reserved for observations,
+ * mirroring the summary renderer. Reflections are never pruned, so without a
+ * reserve they would eventually starve the workers of the records they act on.
+ */
+export const WORKER_OBSERVATIONS_MIN_SHARE = 0.5;
 
 /** Fallback estimate used before a model is available or when tokenizer setup fails. */
 export function estimateTextTokens(text: string): number {

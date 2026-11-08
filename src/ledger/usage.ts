@@ -1,4 +1,4 @@
-import { latestCoverageIndex } from "./fold";
+import { latestCoverageIndex, latestResetBoundaryIndex } from "./fold";
 import { OM_OBSERVATIONS_RECORDED, type LedgerEntry } from "./types";
 
 type UsageLike = {
@@ -61,12 +61,12 @@ function realContextTokensAtCoverage(
 
 /**
  * Provider-reported context growth since the observer's latest coverage anchor
- * (or since the latest compaction when coverage is behind it).
+ * (or since the latest compaction or `/clear` when coverage is behind it).
  *
  * Returns `undefined` before the first observation coverage and when no
- * compaction exists: provider context at that point includes the system prompt
- * and tools, which are not unobserved conversation. The raw estimate stays
- * authoritative until there is a real anchor.
+ * compaction or `/clear` exists: provider context at that point includes the
+ * system prompt and tools, which are not unobserved conversation. The raw
+ * estimate stays authoritative until there is a real anchor.
  *
  * Returns `undefined` when no trustworthy baseline exists or the context shrank
  * (for example, a mid-session accounting-basis change); callers then fall back
@@ -91,14 +91,17 @@ export function realTokensSinceObservationCoverage(
 			break;
 		}
 	}
+	// A `/clear` rebuilds provider context from scratch just like a
+	// compaction, so the newer of the two is the context-basis anchor.
+	const anchorIndex = Math.max(compactionIndex, latestResetBoundaryIndex(entries));
 
 	let baseline: number | undefined;
-	if (compactionIndex > coverageIndex) {
-		baseline = realContextTokensAfterCompaction(entries, compactionIndex);
+	if (anchorIndex > coverageIndex) {
+		baseline = realContextTokensAfterCompaction(entries, anchorIndex);
 	} else if (coverageIndex >= 0) {
-		// Never anchor on usage from before a compaction: that usage describes
-		// the pre-compaction context, not the post-compaction basis.
-		const floorIndex = compactionIndex >= 0 ? compactionIndex + 1 : 0;
+		// Never anchor on usage from before a compaction or `/clear`: that
+		// usage describes the previous context, not the current basis.
+		const floorIndex = anchorIndex >= 0 ? anchorIndex + 1 : 0;
 		baseline = realContextTokensAtCoverage(entries, coverageIndex, floorIndex);
 	} else {
 		return undefined;

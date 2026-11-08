@@ -16,6 +16,18 @@ export interface RuntimeError {
 }
 
 /**
+ * Where branch-local worker state was recorded: the branch tip and the latest
+ * host `/clear` boundary (`reset_boundary` entry) at that moment. Same-session
+ * tree navigation and `/clear` both keep the runtime, so such state is ignored
+ * once its tip leaves the branch or a different boundary is the latest one:
+ * the reset-aware fold and source clocks restart at a new boundary.
+ */
+export interface BranchFingerprint {
+	tipId?: string;
+	resetId?: string;
+}
+
+/**
  * Per-session state. The extension factory is re-invoked for a new session or
  * a bound child, so keeping this inside the factory closure isolates sessions
  * while still giving every handler one stable runtime.
@@ -40,13 +52,54 @@ export class SessionRuntime {
 	lastCompactionOwned: boolean | undefined;
 	lastCompactionAt = 0;
 	lastCompactionRecords = 0;
-	lastCompactingAt = 0;
+	/**
+	 * omp Hide Secrets state for this session: "paused" while automatic passes
+	 * are paused because worker requests cannot use the host obfuscation,
+	 * "overridden" once `/ob-memory passive off` resumed them anyway (never
+	 * re-paused in this runtime), undefined otherwise.
+	 */
+	hostSecretsPause: "paused" | "overridden" | undefined;
 	lastObserverAt = 0;
 	lastReflectorAt = 0;
 	lastDropperAt = 0;
 	lastTriggerReason: string | undefined;
-	emptyBackoff: { coverageId: string | undefined; tokensAtEmpty: number } | undefined;
-	emptyReflectionBackoff: { coverageId: string | undefined; observationTokens: number } | undefined;
+	/** Spaces observer retries after a run that accepted nothing. */
+	emptyBackoff: ({ coverageId: string | undefined; tokensAtEmpty: number } & BranchFingerprint) | undefined;
+	/**
+	 * Set after every reflector pass, productive or not: further automatic
+	 * passes wait until enough new observation tokens are recorded on this
+	 * branch since the latest `/clear`. `recordedTokens` counts every recorded
+	 * observation, dropped or not, so drops cannot reopen the gate over an
+	 * unchanged pool.
+	 */
+	reflectionGate: ({ recordedTokens: number; tipId: string | undefined } & BranchFingerprint) | undefined;
+	/**
+	 * Unproductive observer attempts on the chunk starting at `startId` (all
+	 * proposals rejected, truncated, exhausted, or answered in prose). The
+	 * chunk's first entry can sit before a fork point and so be on several
+	 * paths: the counter only applies on the path it was recorded on.
+	 */
+	observerRetry: ({ startId: string; attempts: number } & BranchFingerprint) | undefined;
+	/**
+	 * A dropper call was due but did not complete (aborted or failed). The
+	 * next automatic pass retries the dropper alone while the pool is still
+	 * over `observationsPoolMaxTokens`, without re-running the reflector over an
+	 * unchanged pool. `failures` counts failed (not aborted) calls; after
+	 * DROPPER_MAX_FAILURES only the next reflector pass re-arms the dropper.
+	 */
+	dropPending: (BranchFingerprint & { failures: number }) | undefined;
+	/** Follow-up passes scheduled since the last lifecycle-triggered pass. */
+	followUpPasses = 0;
+	/** Retries scheduled for triggers that found the lock busy. */
+	busyRetries = 0;
+	/**
+	 * Runs before every automatic consolidation pass, before each of its
+	 * observer, reflector and dropper stages, and before each compaction
+	 * catch-up chunk. omp sends extensions no event when Hide
+	 * Secrets is switched on, so index.ts installs its guard here; the guard
+	 * can make the session passive and abort the running pass.
+	 */
+	beforePass: (() => void) | undefined;
 	readonly #pi: ExtensionAPI;
 	readonly #timers = new Set<ManagedTimer>();
 	/** Resolves after the in-flight exclusive pass has released `busy`. */
@@ -174,7 +227,8 @@ export class SessionRuntime {
 
 	/**
 	 * Run one consolidation/compaction pass at a time. Returning false is a
-	 * normal scheduling outcome, not an error; the next trigger will retry.
+	 * normal scheduling outcome, not an error; consolidation schedules a
+	 * bounded retry for a trigger that found the lock busy.
 	 */
 	async runExclusive(
 		label: string,

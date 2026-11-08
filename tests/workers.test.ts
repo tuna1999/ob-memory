@@ -28,6 +28,10 @@ const resolved: ResolvedWorkerModel = {
 	fallbackUsed: false,
 };
 
+function validProposal(sourceEntryId: string, content = "User chose Postgres for the project database.") {
+	return { timestamp: "2026-10-29 10:00", content, relevance: "high", sourceEntryIds: [sourceEntryId] };
+}
+
 function observation(id: string, content = "User stated the project uses Postgres."): Observation {
 	return {
 		id,
@@ -173,6 +177,77 @@ describe("observer turn budget", () => {
 		expect(entries.some((entry) => entry.customType === "ob-memory.observations.recorded")).toBe(false);
 	});
 
+	test("does not append a valid observation when aborted after the last turn responds", async () => {
+		// One turn and a valid proposal: no later turn-start check can mask a
+		// missing abort guard between the model response and the append.
+		const { runtime, entries } = makeHarness({ agentMaxTurns: 1, redactSecrets: false });
+		entries.push(messageEntry("e1", "user", "Please use Postgres for this project."));
+		const chunk = chunkUnobservedEntries(entries, undefined, 10_000);
+		const controller = new AbortController();
+		const complete = (async () => {
+			controller.abort();
+			return makeAssistant([makeToolCall("record_observations", { observations: [validProposal("e1")] })], "toolUse");
+		}) as typeof completeSimple;
+		await expect(
+			observeChunk(runtime, entries, resolved, chunk!, controller.signal, complete),
+		).rejects.toThrow();
+		expect(entries.some((entry) => entry.customType === "ob-memory.observations.recorded")).toBe(false);
+	});
+
+	test("does not append reflections when the pass is aborted after the reflector responds", async () => {
+		const { runtime, entries } = makeHarness({
+			agentMaxTurns: 1,
+			observeAfterTokens: 1_000_000,
+			reflectAfterTokens: 1,
+			observationsPoolMaxTokens: 1_000_000,
+			redactSecrets: false,
+		});
+		const obs = observation("aaaaaaaaaaaa");
+		entries.push(messageEntry("e1", "user", "Please use Postgres for this project."));
+		entries.push(observationEntry("e2", [obs], "e1"));
+		const complete = (async () => {
+			runtime.abort("test");
+			return makeAssistant(
+				[
+					makeToolCall("record_reflections", {
+						reflections: [{ content: "The project database is Postgres.", supportingObservationIds: [obs.id] }],
+					}),
+				],
+				"toolUse",
+			);
+		}) as unknown as typeof completeSimple;
+		const result = await consolidate(runtime, "test", { complete });
+		expect(result.reflected).toBe(0);
+		expect(result.skipped).toBe("aborted");
+		expect(entries.some((entry) => entry.customType === "ob-memory.reflections.recorded")).toBe(false);
+	});
+
+	test("does not append drops when the pass is aborted after the dropper responds", async () => {
+		const { runtime, entries } = makeHarness({
+			agentMaxTurns: 1,
+			observeAfterTokens: 1_000_000,
+			reflectAfterTokens: 1,
+			observationsPoolMaxTokens: 1,
+			observationsPoolTargetTokens: 1,
+			redactSecrets: false,
+		});
+		const low = { ...observation("aaaaaaaaaaaa", "User mentioned the office coffee machine."), relevance: "low" as const };
+		entries.push(messageEntry("e1", "user", "Coffee chat."));
+		entries.push(observationEntry("e2", [low], "e1"));
+		let calls = 0;
+		const complete = (async () => {
+			calls++;
+			// Reflector: nothing durable. Dropper: proposes the low record, then the pass aborts.
+			if (calls === 1) return makeAssistant([text("nothing durable")]);
+			runtime.abort("test");
+			return makeAssistant([makeToolCall("drop_observations", { ids: [low.id] })], "toolUse");
+		}) as unknown as typeof completeSimple;
+		const result = await consolidate(runtime, "test", { complete });
+		expect(calls).toBe(2);
+		expect(result.dropped).toBe(0);
+		expect(entries.some((entry) => entry.customType === "ob-memory.observations.dropped")).toBe(false);
+	});
+
 	test("does not claim coverage past the last cited source entry", async () => {
 		const { runtime, entries } = makeHarness({ agentMaxTurns: 1, redactSecrets: false });
 		entries.push(messageEntry("e1", "user", "first source"), messageEntry("e2", "assistant", "second source"));
@@ -313,6 +388,34 @@ describe("reflector", () => {
 		expect(records).toBeUndefined();
 	});
 
+	test("keeps observations in the worker context when reflections exceed the budget", async () => {
+		const { runtime } = makeHarness({ redactSecrets: false, workerMemoryMaxTokens: 600 });
+		const reflections = Array.from({ length: 60 }, (_, index) => ({
+			id: index.toString(16).padStart(12, "c"),
+			content: `Reflection number ${index} about a durable project decision.`,
+			supportingObservationIds: ["dddddddddddd"],
+			tokenCount: 15,
+		}));
+		const obs = observation("aaaaaaaaaaaa", "User chose Postgres for the ledger store.");
+		const call = makeAssistant(
+			[
+				makeToolCall("record_reflections", {
+					reflections: [{ content: "The project stores its ledger in Postgres.", supportingObservationIds: [obs.id] }],
+				}),
+			],
+			"toolUse",
+		);
+		const records = await runReflector({
+			runtime,
+			resolved,
+			reflections,
+			observations: [obs],
+			signal: new AbortController().signal,
+			complete: scriptedComplete([call, makeAssistant([text("done")])]),
+		});
+		expect(records?.[0]?.supportingObservationIds).toEqual([obs.id]);
+	});
+
 	test("rejects support ids omitted from the bounded worker context", async () => {
 		const { runtime } = makeHarness({ redactSecrets: false, workerMemoryMaxTokens: 1 });
 		const obs = observation("aaaaaaaaaaaa");
@@ -379,7 +482,58 @@ describe("dropper", () => {
 		expect(ids).toBeUndefined();
 		expect(prompt).toContain(oldest.id);
 		expect(prompt).not.toContain(newest.id);
-		expect(prompt).toContain("1 newer observation omitted");
+		expect(prompt).toContain("1 observation omitted");
+	});
+
+	test("skips an oversized oldest observation instead of hiding every later one", async () => {
+		const { runtime } = makeHarness({ redactSecrets: false, workerMemoryMaxTokens: 150 });
+		const oversized = observation("aaaaaaaaaaaa", "a".repeat(800));
+		const small = observation("bbbbbbbbbbbb", "User mentioned the office coffee machine.");
+		let prompt = "";
+		const complete = (async (_model: unknown, context: { messages: Array<{ content: unknown }> }) => {
+			const content = context.messages[0]?.content;
+			prompt = typeof content === "string" ? content : "";
+			return makeAssistant([text("keep")]);
+		}) as typeof completeSimple;
+		await runDropper({
+			runtime,
+			resolved,
+			reflections: [],
+			observations: [oversized, small],
+			targetTokens: 1,
+			signal: new AbortController().signal,
+			complete,
+		});
+		expect(prompt).not.toContain(oversized.id);
+		expect(prompt).toContain(small.id);
+	});
+
+	test("reserves part of the worker budget for observations when reflections are large", async () => {
+		const { runtime } = makeHarness({ redactSecrets: false, workerMemoryMaxTokens: 600 });
+		const reflections = Array.from({ length: 60 }, (_, index) => ({
+			id: index.toString(16).padStart(12, "c"),
+			content: `Reflection number ${index} about a durable project decision.`,
+			supportingObservationIds: ["dddddddddddd"],
+			tokenCount: 15,
+		}));
+		const low = { ...observation("aaaaaaaaaaaa", "User mentioned the office coffee machine."), relevance: "low" as const };
+		let calls = 0;
+		const complete = (async () => {
+			calls++;
+			return calls === 1
+				? makeAssistant([makeToolCall("drop_observations", { ids: [low.id] })], "toolUse")
+				: makeAssistant([text("done")]);
+		}) as unknown as typeof completeSimple;
+		const ids = await runDropper({
+			runtime,
+			resolved,
+			reflections,
+			observations: [low],
+			targetTokens: 1,
+			signal: new AbortController().signal,
+			complete,
+		});
+		expect(ids).toEqual([low.id]);
 	});
 
 	test("drops over-budget uncovered records after an empty reflection pass, never high ones", async () => {

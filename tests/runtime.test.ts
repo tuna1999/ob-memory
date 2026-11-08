@@ -50,6 +50,8 @@ describe("session runtime", () => {
 		expect(result.skipped).toBe("busy");
 		gate.resolve();
 		await holder;
+		// Drop the bounded busy retry this trigger scheduled.
+		runtime.dispose("test");
 	});
 
 	test("failure backoff doubles and reaches the 5 minute cap", () => {

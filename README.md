@@ -102,12 +102,12 @@ Without `model`, memory workers use the active session model. A configured `fall
 
 | Command | Purpose |
 |---|---|
-| `/ob-memory view` | Visible memory from the latest compaction when it was memory-owned; empty after a newer native compaction; full ledger if no compaction exists |
-| `/ob-memory view full` | Full active ledger on the current branch |
-| `/ob-memory status` | Counts, coverage watermarks, pressure, drift, last run/error |
-| `/ob-memory observe-now` | Run one consolidation pass immediately |
-| `/ob-memory passive on\|off` | Pause/resume automatic workers for this session (session only) |
-| `/ob-memory config` | Effective config |
+| `/ob-memory view` | Memory the model can currently see: the latest compaction's records when it was memory-owned; after a newer native compaction it points to `view full`; with no compaction, or after a `/clear` newer than the latest compaction, the live ledger minus records cleared by that `/clear` |
+| `/ob-memory view full` | Full active ledger on the current branch, including records cleared by `/clear` (shown for audit, never sent to a model) |
+| `/ob-memory status` | Counts, coverage watermarks, pressure, drift, last run/error, omp Hide Secrets state and pause |
+| `/ob-memory observe-now` | Run one consolidation pass immediately (refused while paused for omp Hide Secrets) |
+| `/ob-memory passive on\|off` | Pause/resume automatic workers, compaction ownership and native-compaction memory context for this session (session only); `on` also stops the running pass |
+| `/ob-memory config` | Effective config, including the worker model the next pass would select (`workerModelSource`: configured, session, fallback, or unavailable) |
 | `/ob-memory help` | Command help |
 
 Tool:
@@ -116,7 +116,7 @@ Tool:
 { "id": "fe1bc972f74d" }
 ```
 
-`ob_recall` returns the record, supporting observations for a reflection, and source evidence within a token cap.
+`ob_recall` returns the record, supporting observations for a reflection, and source evidence within a token cap. It declares the `read` approval tier, so read-only approval modes auto-approve it. Records cleared by `/clear` are reported as cleared.
 
 ## Compaction behavior
 
@@ -124,18 +124,25 @@ Tool:
 
 - the reason is not `overflow`;
 - `ownManualCompaction` / `ownAutoCompaction` permits it;
-- the observer's `coversUpToId` reaches every source entry that would be summarized.
+- the observer has covered every source entry that would be summarized (a chunk the observer skipped after repeated failures does not count while it is still in context).
 
 If the observer is behind the proposed cut, the plugin first tries a bounded synchronous catch-up (`compactionCatchUpMaxChunks`, `compactionCatchUpBudgetMs`), aborting any background consolidation that is still running so it does not skip catch-up. If that is not enough, it either:
 
 - moves the cut back to retain the unobserved tail, subject to `compactionMaxRetainedTokens`, or
 - delegates to omp's native summarizer.
 
-When delegating, `session.compacting` supplies the rendered ledger as extra summary context and records `preserveData["ob-memory"]`. This hook is advisory: native methods that consume summarizer context (for example `soft`) generally use it, while deterministic methods such as `snapcompact` and `handoff` may not embed it in the final summary. The host skips `session.compacting` when a custom result was supplied, so the two paths cannot duplicate memory in one pass. Focused `/compact <instructions>` deliberately delegates so the native summarizer can honor the user's focus while still receiving the memory context. If memory must be authoritative in the retained context, keep compaction ownership enabled and coverage current.
+Owned compactions are sized to the check omp runs after a compaction. After a threshold compaction, the estimated system prompt and tool schemas, the kept or retained tail, and the memory summary must fit omp's post-compaction recovery band (80% of the compaction threshold); after an incomplete-turn retry they must fit the window less omp's budget reserve (the larger of 15% of the window and `compaction.reserveTokens`, default 16,384); overflow recovery always delegates. omp does not check idle compactions or manual `/compact`, so their summary is not shrunk. A summary that does not fit is shrunk to the room left, listing records about the compacted range before records about messages that stay in context; omitted records stay in the ledger (`/ob-memory view full`) and are rendered again by the next owned compaction. A retained unobserved tail is always held to the band and to `compactionMaxRetainedTokens`, and compaction is delegated when the room left is below the native fallback size and cannot hold every record about the compacted range. The fixed context is an estimate, so this makes omp's dead-end rescue path unlikely rather than impossible.
+
+With `compaction.experimentalContextManagement` enabled, catch-up is skipped because omp cancels a rollover whose branch leaf moved during the hook.
+
+Installing ob-memory turns off omp's async (speculative) compaction once a session binds with a config that can own compaction, because omp keeps blocking semantics for extensions that intercept `session_before_compact`. See [`docs/config.md`](docs/config.md#async-compaction).
+
+When delegating (unless passive, including the omp Hide Secrets pause), `session.compacting` supplies the rendered ledger as extra summary context and records `preserveData["ob-memory"]`. This hook is advisory: native methods that consume summarizer context (for example `soft`) generally use it, while deterministic methods such as `snapcompact` and `handoff` may not embed it in the final summary. The context is supplied on every compaction attempt, including host method fallbacks. The host skips `session.compacting` when a custom result was supplied, so the two paths cannot duplicate memory in one pass. Focused `/compact <instructions>` deliberately delegates so the native summarizer can honor the user's focus while still receiving the memory context. If memory must be authoritative in the retained context, keep compaction ownership enabled and coverage current.
 
 ## Privacy
 
-- Credentials are redacted from worker prompts, stored observations/reflections, compaction summaries, recall output, and debug logs. Redaction is best-effort pattern matching, not encryption.
+- Credentials are redacted from worker prompts, stored observations/reflections, compaction summaries, recall output, notifications, and debug logs. Redaction is best-effort pattern matching, not encryption.
+- omp's Hide Secrets obfuscation does not apply to worker requests, so while it is on ob-memory pauses automatic memory passes, and stops supplying memory to compaction, by default (`pauseOnHostSecrets`; `/ob-memory passive off` overrides for the session). See [`docs/privacy.md`](docs/privacy.md#omp-hide-secrets).
 - Images are placeholders by default. `observeAttachments: true` includes only mime-type metadata, never image bytes.
 - Debug logs are off by default. When enabled they go to `<agentDir>/ob-memory/debug/<sessionId>.ndjson` and contain redacted metadata and usage, not full prompts.
 - The plugin does not create a second database or send data anywhere except the configured model provider.

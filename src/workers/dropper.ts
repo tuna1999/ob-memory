@@ -1,9 +1,9 @@
 import { completeSimple, type TJsonSchema } from "@oh-my-pi/pi-ai";
-import { estimateTextTokens } from "../constants";
+import { WORKER_OBSERVATIONS_MIN_SHARE, estimateTextTokens } from "../constants";
 import { observationLine, reflectionLine, type Observation, type Reflection } from "../ledger/types";
 import { redactText } from "../security/redact";
 import type { SessionRuntime } from "../runtime";
-import { runWorkerLoop, type WorkerToolResult } from "./loop";
+import { formatRejections, runWorkerLoop, type WorkerToolResult } from "./loop";
 import type { ResolvedWorkerModel } from "./model";
 import { DROPPER_SYSTEM } from "./prompts";
 import { resolveWorkerMemoryMaxTokens } from "../config";
@@ -80,9 +80,29 @@ interface BoundedDropperContext {
 }
 
 /**
+ * Select records within `budget` in the given index order; a record that does
+ * not fit is skipped, not a stop marker, so one long record cannot hide the rest.
+ */
+function selectWithinBudget(lines: readonly string[], order: readonly number[], budget: number): { indexes: number[]; tokens: number } {
+	const indexes: number[] = [];
+	let tokens = 0;
+	for (const index of order) {
+		const cost = estimateTextTokens(lines[index]!) + 1;
+		if (tokens + cost > budget) continue;
+		indexes.push(index);
+		tokens += cost;
+	}
+	indexes.sort((a, b) => a - b);
+	return { indexes, tokens };
+}
+
+/**
  * Keep the worker request inside `workerMemoryMaxTokens`. Oldest observations
- * are the primary drop candidates, so the window is oldest-first; newer ones
- * are omitted and cannot be selected.
+ * are the primary drop candidates, so they are selected oldest-first, and they
+ * keep at least WORKER_OBSERVATIONS_MIN_SHARE of the budget: reflections are
+ * never pruned and would otherwise leave the dropper nothing to act on.
+ * Reflections take the rest, newest first, and either side reclaims what the
+ * other leaves unused. Omitted observations cannot be selected.
  */
 function boundedContext(
 	reflections: readonly Reflection[],
@@ -90,27 +110,23 @@ function boundedContext(
 	maxTokens: number,
 ): BoundedDropperContext {
 	const reflectionLines = reflections.map(reflectionLine);
-	let tokens = estimateTextTokens("CURRENT REFLECTIONS:\nCURRENT OBSERVATIONS:\n(none yet)");
-	const selectedReflections: string[] = [];
-	for (let i = reflectionLines.length - 1; i >= 0; i--) {
-		const line = reflectionLines[i]!;
-		const cost = estimateTextTokens(line) + 1;
-		if (tokens + cost > maxTokens) continue;
-		selectedReflections.unshift(line);
-		tokens += cost;
-	}
-	const selectedLines: string[] = [];
-	const included: Observation[] = [];
-	for (const observation of observations) {
-		const line = `${observationLine(observation)} [coverage: ${coverageTier(observation.id, reflections)}]`;
-		const cost = estimateTextTokens(line) + 1;
-		if (tokens + cost > maxTokens) break;
-		selectedLines.push(line);
-		included.push(observation);
-		tokens += cost;
-	}
+	const observationLines = observations.map(
+		(observation) => `${observationLine(observation)} [coverage: ${coverageTier(observation.id, reflections)}]`,
+	);
+	const available = Math.max(
+		0,
+		maxTokens - estimateTextTokens("CURRENT REFLECTIONS:\nCURRENT OBSERVATIONS:\n(none yet)"),
+	);
+	const oldestFirst = observationLines.map((_, index) => index);
+	const newestFirst = reflectionLines.map((_, index) => reflectionLines.length - 1 - index);
+	const reserved = selectWithinBudget(observationLines, oldestFirst, Math.floor(available * WORKER_OBSERVATIONS_MIN_SHARE));
+	const pickedReflections = selectWithinBudget(reflectionLines, newestFirst, available - reserved.tokens);
+	const pickedObservations = selectWithinBudget(observationLines, oldestFirst, available - pickedReflections.tokens);
+	const selectedReflections = pickedReflections.indexes.map((index) => reflectionLines[index]!);
+	const selectedLines = pickedObservations.indexes.map((index) => observationLines[index]!);
+	const included = pickedObservations.indexes.map((index) => observations[index]!);
 	const omitted = observations.length - included.length;
-	const omittedNote = omitted > 0 ? `\n(${omitted} newer observation${omitted === 1 ? "" : "s"} omitted to fit the worker memory budget.)` : "";
+	const omittedNote = omitted > 0 ? `\n(${omitted} observation${omitted === 1 ? "" : "s"} omitted to fit the worker memory budget.)` : "";
 	return {
 		text: `CURRENT REFLECTIONS:
 ${selectedReflections.length > 0 ? selectedReflections.join("\n") : "(none yet)"}
@@ -141,8 +157,9 @@ export async function runDropper(options: RunDropperOptions): Promise<string[] |
 	if (context.observations.length === 0) return undefined;
 	const allowed = new Map(context.observations.map((observation) => [observation.id, observation]));
 	const selected = new Set<string>();
-	let rejected = 0;
-	let duplicates = 0;
+	// Run totals feed diagnostics; each tool result reports only its own call.
+	let runRejected = 0;
+	let runDuplicates = 0;
 
 	const tool = {
 		name: "drop_observations",
@@ -151,16 +168,31 @@ export async function runDropper(options: RunDropperOptions): Promise<string[] |
 		parameters: DROP_SCHEMA,
 		execute: async (args: Record<string, unknown>): Promise<WorkerToolResult> => {
 			const ids = args.ids;
-			if (!Array.isArray(ids)) return { text: "Invalid arguments: ids must be an array.", isError: true };
+			if (!Array.isArray(ids)) {
+				runRejected++;
+				return { text: "Invalid arguments: ids must be an array of observation ids. Nothing was queued.", isError: true };
+			}
 			let added = 0;
-			for (const id of ids) {
+			let rejected = 0;
+			let duplicates = 0;
+			const reasons: string[] = [];
+			for (let index = 0; index < ids.length; index++) {
+				const id: unknown = ids[index];
+				const label = `#${index + 1}`;
 				if (typeof id !== "string" || !allowed.has(id)) {
 					rejected++;
+					reasons.push(`${label}: not an id listed under CURRENT OBSERVATIONS`);
 					continue;
 				}
 				const observation = allowed.get(id)!;
-				if (observation.relevance === "critical" || (observation.relevance === "high" && !isCovered(id, reflections))) {
+				if (observation.relevance === "critical") {
 					rejected++;
+					reasons.push(`${label}: critical observations are never dropped`);
+					continue;
+				}
+				if (observation.relevance === "high" && !isCovered(id, reflections)) {
+					rejected++;
+					reasons.push(`${label}: high observations need reflection coverage before they can be dropped`);
 					continue;
 				}
 				if (selected.has(id)) {
@@ -169,16 +201,23 @@ export async function runDropper(options: RunDropperOptions): Promise<string[] |
 				}
 				if (selected.size >= metrics.maxDropsAllowed) {
 					rejected++;
+					reasons.push(`${label}: the hard maximum of ${metrics.maxDropsAllowed} drops is reached`);
 					continue;
 				}
 				selected.add(id);
 				added++;
 			}
+			runRejected += rejected;
+			runDuplicates += duplicates;
+			const nothingAccepted = added === 0 && rejected > 0;
 			return {
 				text:
-					`Queued ${added} drop candidate${added === 1 ? "" : "s"}; ${rejected} rejected; ${duplicates} duplicate${duplicates === 1 ? "" : "s"}. ` +
-					`Selected this run: ${selected.size}/${metrics.maxDropsAllowed}.`,
+					`Queued ${added} drop candidate${added === 1 ? "" : "s"}` +
+					(duplicates > 0 ? ` (${duplicates} duplicate${duplicates === 1 ? "" : "s"} skipped)` : "") +
+					(rejected > 0 ? `; ${rejected} rejected: ${formatRejections(reasons)}` : "") +
+					`. Selected this run: ${selected.size}/${metrics.maxDropsAllowed}.`,
 				details: { added, rejected, duplicates, selected: selected.size, maxDropsAllowed: metrics.maxDropsAllowed },
+				...(nothingAccepted ? { isError: true } : {}),
 			};
 		},
 	};
@@ -211,12 +250,22 @@ Hard maximum drops this run: ${metrics.maxDropsAllowed}. The maximum is an upper
 		tool,
 		signal,
 		sessionId: runtime.sessionId,
+		beforeTurn: runtime.beforePass,
 		complete: options.complete,
 		onUsage: (usage) => runtime.debug.usage("dropper", resolved.label, usage),
+		// A later turn failing must not discard drops already validated.
+		keepPartialOnError: () => selected.size > 0,
 	});
+	if (result.failed) {
+		runtime.debug.record("dropper", "partial_after_error", { turns: result.turns, error: result.errorMessage });
+	}
 	const ids = Array.from(selected);
 	if (ids.length === 0) {
-		runtime.debug.record("dropper", "empty", { toolCalls: result.toolCallCount, rejected, duplicates });
+		runtime.debug.record("dropper", "empty", {
+			toolCalls: result.toolCallCount,
+			rejected: runRejected,
+			duplicates: runDuplicates,
+		});
 		return undefined;
 	}
 	runtime.debug.record("dropper", "recorded", { count: ids.length, tokens: ids.reduce((total, id) => total + (allowed.get(id)?.tokenCount ?? 0), 0) });

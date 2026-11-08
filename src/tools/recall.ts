@@ -8,6 +8,8 @@ export function registerRecallTool(pi: ExtensionAPI, getRuntime: () => SessionRu
 	pi.registerTool({
 		name: "ob_recall",
 		label: "Recall observational memory",
+		// Read-only lookup of session entries; omitted, the host treats it as "exec".
+		approval: "read",
 		description:
 			"Recover one observational-memory record by exact id and, for observations, its original source evidence. Use this only when a memory id in compacted context needs verification or more precision; do not use it as a broad search.",
 		parameters: z.object({

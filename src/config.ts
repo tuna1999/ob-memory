@@ -8,6 +8,7 @@ import {
 	type ObMemoryConfig,
 	type ThinkingLevel,
 } from "./config-types";
+import { MAX_WORKER_OUTPUT_TOKENS } from "./workers/model";
 
 export interface ConfigLoadOptions {
 	cwd: string;
@@ -89,8 +90,16 @@ function asBoolean(value: unknown, key: string, warnings: string[]): boolean | u
 	return undefined;
 }
 
+/** Decimal digits only: blank, signed, hex, and exponent strings are rejected rather than coerced. */
+const INTEGER_STRING_PATTERN = /^\s*\d+\s*$/;
+
 function asPositiveInt(value: unknown, key: string, warnings: string[], allowZero = false): number | undefined {
-	const number = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+	const number =
+		typeof value === "number"
+			? value
+			: typeof value === "string" && INTEGER_STRING_PATTERN.test(value)
+				? Number(value)
+				: Number.NaN;
 	if (!Number.isFinite(number) || !Number.isInteger(number) || number < (allowZero ? 0 : 1)) {
 		warnings.push(`${key}: expected ${allowZero ? "a non-negative" : "a positive"} integer, got ${JSON.stringify(value)}`);
 		return undefined;
@@ -108,6 +117,7 @@ const BOOLEAN_KEYS = [
 	"ownAutoCompaction",
 	"debugLog",
 	"showNotifications",
+	"pauseOnHostSecrets",
 ] as const;
 
 const POSITIVE_INT_KEYS = [
@@ -126,21 +136,46 @@ const MAX_CATCH_UP_BUDGET_MS = 25_000;
 const MAX_CATCH_UP_CHUNKS = 8;
 const MAX_WORKER_BUDGET_TOKENS = 1_000_000;
 
-function validateReflectionThreshold(
-	config: ObMemoryConfig,
-	source: string,
-	warnings: string[],
-): void {
+/** The source (file path or "environment") that last set a key, in load order. */
+interface KeyOrigin {
+	source: string;
+	layer: number;
+}
+type KeyOrigins = Map<keyof ObMemoryConfig, KeyOrigin>;
+
+/**
+ * Attribute a merged-config warning to the latest layer that set any of the
+ * involved keys: that layer introduced the conflict.
+ */
+function attribution(origins: KeyOrigins, ...keys: ReadonlyArray<keyof ObMemoryConfig>): string {
+	let latest: KeyOrigin | undefined;
+	for (const key of keys) {
+		const origin = origins.get(key);
+		if (origin && (!latest || origin.layer > latest.layer)) latest = origin;
+	}
+	return latest?.source ?? "defaults";
+}
+
+function clampPoolTarget(config: ObMemoryConfig, origins: KeyOrigins, warnings: string[]): void {
+	if (config.observationsPoolTargetTokens <= config.observationsPoolMaxTokens) return;
+	warnings.push(
+		`${attribution(origins, "observationsPoolTargetTokens", "observationsPoolMaxTokens")}: observationsPoolTargetTokens (${config.observationsPoolTargetTokens}) exceeds observationsPoolMaxTokens (${config.observationsPoolMaxTokens}); target clamped`,
+	);
+	config.observationsPoolTargetTokens = config.observationsPoolMaxTokens;
+}
+
+function validateReflectionThreshold(config: ObMemoryConfig, origins: KeyOrigins, warnings: string[]): void {
 	if (config.reflectAfterTokens <= config.observationsPoolMaxTokens) return;
 	warnings.push(
-		`${source}: reflectAfterTokens (${config.reflectAfterTokens}) exceeds observationsPoolMaxTokens (${config.observationsPoolMaxTokens}); reflection threshold clamped`,
+		`${attribution(origins, "reflectAfterTokens", "observationsPoolMaxTokens")}: reflectAfterTokens (${config.reflectAfterTokens}) exceeds observationsPoolMaxTokens (${config.observationsPoolMaxTokens}); reflection threshold clamped`,
 	);
 	config.reflectAfterTokens = config.observationsPoolMaxTokens;
 }
 
-function clampResourceLimits(config: ObMemoryConfig, source: string, warnings: string[]): void {
+function clampResourceLimits(config: ObMemoryConfig, origins: KeyOrigins, warnings: string[]): void {
 	const limits: ReadonlyArray<[keyof ObMemoryConfig, number]> = [
 		["agentMaxTurns", MAX_AGENT_TURNS],
+		["agentMaxTokens", MAX_WORKER_OUTPUT_TOKENS],
 		["observerChunkMaxTokens", MAX_WORKER_BUDGET_TOKENS],
 		["workerMemoryMaxTokens", MAX_WORKER_BUDGET_TOKENS],
 		["compactionCatchUpMaxChunks", MAX_CATCH_UP_CHUNKS],
@@ -149,9 +184,21 @@ function clampResourceLimits(config: ObMemoryConfig, source: string, warnings: s
 	for (const [key, max] of limits) {
 		const value = config[key];
 		if (typeof value !== "number" || value <= max) continue;
-		warnings.push(`${source}: ${String(key)} (${value}) exceeds the supported maximum; clamped to ${max}`);
+		warnings.push(`${attribution(origins, key)}: ${String(key)} (${value}) exceeds the supported maximum; clamped to ${max}`);
 		Object.assign(config, { [key]: max });
 	}
+}
+
+/**
+ * Cross-field and resource clamps run once, on the merged config, so a later
+ * layer that raises a limit is never undercut by an earlier layer's clamp.
+ */
+function finalizeConfig(config: ObMemoryConfig, origins: KeyOrigins, warnings: string[]): ObMemoryConfig {
+	const finalized: ObMemoryConfig = { ...config };
+	clampPoolTarget(finalized, origins, warnings);
+	validateReflectionThreshold(finalized, origins, warnings);
+	clampResourceLimits(finalized, origins, warnings);
+	return finalized;
 }
 
 function applyObject(
@@ -159,8 +206,14 @@ function applyObject(
 	raw: Record<string, unknown>,
 	source: string,
 	warnings: string[],
+	origins: KeyOrigins,
+	layer: number,
 ): ObMemoryConfig {
 	const config: ObMemoryConfig = { ...base };
+	const set = <K extends keyof ObMemoryConfig>(key: K, value: ObMemoryConfig[K]): void => {
+		config[key] = value;
+		origins.set(key, { source, layer });
+	};
 	const known = new Set<string>([
 		...BOOLEAN_KEYS,
 		...POSITIVE_INT_KEYS,
@@ -177,45 +230,37 @@ function applyObject(
 	for (const key of BOOLEAN_KEYS) {
 		if (!(key in raw)) continue;
 		const value = asBoolean(raw[key], `${source}.${key}`, warnings);
-		if (value !== undefined) config[key] = value;
+		if (value !== undefined) set(key, value);
 	}
 	for (const key of POSITIVE_INT_KEYS) {
 		if (!(key in raw)) continue;
 		const value = asPositiveInt(raw[key], `${source}.${key}`, warnings);
-		if (value !== undefined) config[key] = value;
+		if (value !== undefined) set(key, value);
 	}
 	if ("compactionSummaryMaxTokens" in raw) {
 		const value = asPositiveInt(raw.compactionSummaryMaxTokens, `${source}.compactionSummaryMaxTokens`, warnings);
-		if (value !== undefined) config.compactionSummaryMaxTokens = value;
+		if (value !== undefined) set("compactionSummaryMaxTokens", value);
 	}
 	if ("compactionMaxRetainedTokens" in raw) {
 		const value = asPositiveInt(raw.compactionMaxRetainedTokens, `${source}.compactionMaxRetainedTokens`, warnings);
-		if (value !== undefined) config.compactionMaxRetainedTokens = value;
+		if (value !== undefined) set("compactionMaxRetainedTokens", value);
 	}
 	if ("compactionCatchUpMaxChunks" in raw) {
 		const value = asPositiveInt(raw.compactionCatchUpMaxChunks, `${source}.compactionCatchUpMaxChunks`, warnings, true);
-		if (value !== undefined) config.compactionCatchUpMaxChunks = value;
+		if (value !== undefined) set("compactionCatchUpMaxChunks", value);
 	}
 	if ("compactionCatchUpBudgetMs" in raw) {
 		const value = asPositiveInt(raw.compactionCatchUpBudgetMs, `${source}.compactionCatchUpBudgetMs`, warnings, true);
-		if (value !== undefined) config.compactionCatchUpBudgetMs = value;
+		if (value !== undefined) set("compactionCatchUpBudgetMs", value);
 	}
 	if ("model" in raw) {
 		const value = parseModelChoice(raw.model, `${source}.model`, warnings);
-		if (value) config.model = value;
+		if (value) set("model", value);
 	}
 	if ("fallbackModel" in raw) {
 		const value = parseModelChoice(raw.fallbackModel, `${source}.fallbackModel`, warnings);
-		if (value) config.fallbackModel = value;
+		if (value) set("fallbackModel", value);
 	}
-	if (config.observationsPoolTargetTokens > config.observationsPoolMaxTokens) {
-		warnings.push(
-			`${source}: observationsPoolTargetTokens (${config.observationsPoolTargetTokens}) exceeds observationsPoolMaxTokens (${config.observationsPoolMaxTokens}); target clamped`,
-		);
-		config.observationsPoolTargetTokens = config.observationsPoolMaxTokens;
-	}
-	validateReflectionThreshold(config, source, warnings);
-	clampResourceLimits(config, source, warnings);
 	return config;
 }
 
@@ -241,10 +286,18 @@ const ENV_KEYS: ReadonlyArray<readonly [keyof ObMemoryConfig, string]> = [
 	["ownAutoCompaction", "OWN_AUTO_COMPACTION"],
 	["debugLog", "DEBUG_LOG"],
 	["showNotifications", "SHOW_NOTIFICATIONS"],
+	["pauseOnHostSecrets", "PAUSE_ON_HOST_SECRETS"],
 ];
 
-function applyEnv(base: ObMemoryConfig, env: Record<string, string | undefined>, warnings: string[]): ObMemoryConfig {
+function applyEnv(
+	base: ObMemoryConfig,
+	env: Record<string, string | undefined>,
+	warnings: string[],
+	origins: KeyOrigins,
+	layer: number,
+): ObMemoryConfig {
 	const config: ObMemoryConfig = { ...base };
+	const origin: KeyOrigin = { source: "environment", layer };
 	for (const [key, suffix] of ENV_KEYS) {
 		const envKey = `OB_MEMORY_${suffix}`;
 		const raw = env[envKey];
@@ -253,11 +306,17 @@ function applyEnv(base: ObMemoryConfig, env: Record<string, string | undefined>,
 		const current = config[key];
 		if (typeof current === "boolean") {
 			const value = asBoolean(raw, envKey, warnings);
-			if (value !== undefined) Object.assign(config, { [key]: value });
+			if (value !== undefined) {
+				Object.assign(config, { [key]: value });
+				origins.set(key, origin);
+			}
 			continue;
 		}
 		const value = asPositiveInt(raw, envKey, warnings, key === "compactionCatchUpMaxChunks" || key === "compactionCatchUpBudgetMs");
-		if (value !== undefined) Object.assign(config, { [key]: value });
+		if (value !== undefined) {
+			Object.assign(config, { [key]: value });
+			origins.set(key, origin);
+		}
 	}
 	for (const [key, suffix] of [
 		["model", "MODEL"],
@@ -266,27 +325,24 @@ function applyEnv(base: ObMemoryConfig, env: Record<string, string | undefined>,
 		const raw = env[`OB_MEMORY_${suffix}`];
 		if (raw === undefined || raw.trim() === "") continue;
 		const value = parseModelChoice(raw, `OB_MEMORY_${suffix}`, warnings);
-		if (value) config[key] = value;
+		if (value) {
+			config[key] = value;
+			origins.set(key, origin);
+		}
 	}
-	if (config.observationsPoolTargetTokens > config.observationsPoolMaxTokens) {
-		warnings.push(
-			`environment: observationsPoolTargetTokens (${config.observationsPoolTargetTokens}) exceeds observationsPoolMaxTokens (${config.observationsPoolMaxTokens}); target clamped`,
-		);
-		config.observationsPoolTargetTokens = config.observationsPoolMaxTokens;
-	}
-	validateReflectionThreshold(config, "environment", warnings);
-	clampResourceLimits(config, "environment", warnings);
 	return config;
 }
 
 /**
  * Load defaults, then the user file, then the project file, then environment
  * overrides. Invalid values are warned about and ignored rather than throwing:
- * a broken config must never prevent the extension from loading.
+ * a broken config must never prevent the extension from loading. Cross-field
+ * and resource clamps run once on the merged result.
  */
 export function loadConfig(options: ConfigLoadOptions): LoadedConfig {
 	const warnings: string[] = [];
 	const sources: string[] = [];
+	const origins: KeyOrigins = new Map();
 	const warn = options.warn ?? (() => {});
 	const agentDir = resolve(options.agentDir ?? resolveAgentDir(options.env));
 	let config = { ...DEFAULT_CONFIG };
@@ -294,18 +350,19 @@ export function loadConfig(options: ConfigLoadOptions): LoadedConfig {
 	const globalPath = join(agentDir, "ob-memory.json");
 	const globalRaw = readJsonObject(globalPath, warnings);
 	if (globalRaw) {
-		config = applyObject(config, globalRaw, globalPath, warnings);
+		config = applyObject(config, globalRaw, globalPath, warnings, origins, 1);
 		sources.push(globalPath);
 	}
 
 	const projectPath = join(options.cwd, ".omp", "ob-memory.json");
 	const projectRaw = readJsonObject(projectPath, warnings);
 	if (projectRaw) {
-		config = applyObject(config, projectRaw, projectPath, warnings);
+		config = applyObject(config, projectRaw, projectPath, warnings, origins, 2);
 		sources.push(projectPath);
 	}
 
-	config = applyEnv(config, options.env ?? process.env, warnings);
+	config = applyEnv(config, options.env ?? process.env, warnings, origins, 3);
+	config = finalizeConfig(config, origins, warnings);
 	for (const warning of warnings) warn(warning);
 	return { config, warnings, sources };
 }

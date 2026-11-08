@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import type { SessionBeforeCompactEvent } from "@oh-my-pi/pi-coding-agent";
 import type { completeSimple } from "@oh-my-pi/pi-ai";
 import { handleStatus } from "../src/commands/status";
+import { handleSessionBeforeCompact } from "../src/hooks/compaction";
 import { estimateTextTokens } from "../src/constants";
 import { resolveObserverChunkMaxTokens, resolveWorkerMemoryMaxTokens } from "../src/config";
 import { DEFAULT_CONFIG } from "../src/config-types";
@@ -203,33 +205,105 @@ describe("provider context clock", () => {
 		expect(shouldObserve(entries, runtime)).toBe(true);
 	});
 
-	test("consolidation chunks to the resolved model window", async () => {
+	/**
+	 * Session model keeps the harness 128k window; only `test/small` resolves
+	 * to a 1k-window model, so a chunk sized from the session model instead of
+	 * the selected worker model would be roughly 25k tokens.
+	 */
+	function withSmallWorkerModel(runtime: SessionRuntime): void {
+		const sessionModel = runtime.ctx.model;
+		const smallModel = makeModel({ id: "small", contextWindow: 1_000 });
+		Object.assign(runtime.ctx, {
+			models: {
+				current: () => sessionModel,
+				resolve: (spec: string) => (spec === "test/small" ? smallModel : spec.startsWith("missing/") ? undefined : sessionModel),
+			},
+		});
+	}
+
+	function promptRecorder() {
+		const prompts: string[] = [];
+		const models: string[] = [];
+		const complete = (async (
+			model: { id: string },
+			context: { messages: Array<{ content: string }> },
+		) => {
+			models.push(model.id);
+			prompts.push(context.messages[0]?.content ?? "");
+			return makeAssistant([text("done")]);
+		}) as unknown as typeof completeSimple;
+		const chunkTokens = (index: number) =>
+			estimateTextTokens(prompts[index]?.split("NEW CONVERSATION CHUNK:").at(-1) ?? "");
+		return { complete, prompts, models, chunkTokens };
+	}
+
+	test("consolidation chunks to the configured worker model window, not the session model", async () => {
 		const { runtime, entries } = makeHarness({
 			observeAfterTokens: 1,
 			reflectAfterTokens: 100_000,
 			observationsPoolMaxTokens: 100_000,
 			redactSecrets: false,
+			model: { provider: "test", id: "small" },
 		});
-		const smallModel = makeModel({ contextWindow: 1_000 });
-		Object.assign(runtime.ctx, {
-			model: smallModel,
-			models: { current: () => smallModel, resolve: () => smallModel },
-		});
+		withSmallWorkerModel(runtime);
+		expect(runtime.ctx.model?.contextWindow).toBe(128_000);
 		entries.push(messageEntry("e1", "user", "x".repeat(30_000)));
 
-		const prompts: string[] = [];
-		const complete = (async (
-			_model: unknown,
-			context: { messages: Array<{ content: string }> },
-		) => {
-			prompts.push(context.messages[0]?.content ?? "");
-			return makeAssistant([text("done")]);
-		}) as unknown as typeof completeSimple;
+		const recorder = promptRecorder();
+		await consolidate(runtime, "test", { force: true, complete: recorder.complete });
+		expect(recorder.models).toEqual(["small"]);
+		expect(recorder.chunkTokens(0)).toBeLessThan(600);
+	});
 
-		await consolidate(runtime, "test", { force: true, complete });
-		expect(prompts).toHaveLength(1);
-		const chunk = prompts[0]!.split("NEW CONVERSATION CHUNK:").at(-1) ?? "";
-		expect(estimateTextTokens(chunk)).toBeLessThan(600);
+	test("consolidation chunks to a smaller fallback model window", async () => {
+		const { runtime, entries } = makeHarness({
+			observeAfterTokens: 1,
+			reflectAfterTokens: 100_000,
+			observationsPoolMaxTokens: 100_000,
+			redactSecrets: false,
+			model: { provider: "missing", id: "primary" },
+			fallbackModel: { provider: "test", id: "small" },
+		});
+		withSmallWorkerModel(runtime);
+		entries.push(messageEntry("e1", "user", "x".repeat(30_000)));
+
+		const recorder = promptRecorder();
+		await consolidate(runtime, "test", { force: true, complete: recorder.complete });
+		expect(recorder.models).toEqual(["small"]);
+		expect(recorder.chunkTokens(0)).toBeLessThan(600);
+	});
+
+	test("compaction catch-up chunks to the configured worker model window", async () => {
+		const { runtime, ctx, entries } = makeHarness({
+			redactSecrets: false,
+			compactionMaxRetainedTokens: 0,
+			model: { provider: "test", id: "small" },
+		});
+		withSmallWorkerModel(runtime);
+		entries.push(messageEntry("u1", "user", "observed"));
+		entries.push(observationEntry("o1", [observationRecord("0123456789ab", ["u1"], "u1")], "u1"));
+		entries.push(messageEntry("u2", "user", "x".repeat(30_000)));
+		entries.push(messageEntry("u3", "user", "Keep this tail."));
+		const recorder = promptRecorder();
+		const event = {
+			type: "session_before_compact",
+			branchEntries: [...entries],
+			preparation: {
+				firstKeptEntryId: "u3",
+				tokensBefore: 12_000,
+				messagesToSummarize: [],
+				turnPrefixMessages: [],
+				recentMessages: [],
+				isSplitTurn: false,
+				fileOps: { read: new Set(), edited: new Set() },
+				settings: {},
+			},
+			signal: new AbortController().signal,
+		} as unknown as SessionBeforeCompactEvent;
+		await handleSessionBeforeCompact(runtime, event, ctx, { complete: recorder.complete });
+		expect(recorder.prompts.length).toBeGreaterThan(0);
+		expect(recorder.models[0]).toBe("small");
+		expect(recorder.chunkTokens(0)).toBeLessThan(600);
 	});
 
 	test("status reports the provider context delta", () => {

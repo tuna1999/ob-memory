@@ -73,4 +73,29 @@ time("chunkUnobserved (12k budget)", 10, () =>
 time(`compactionProjection x${COMPACTIONS}`, COMPACTIONS, () =>
 	void compactionProjection(entries, entries[Math.floor(entries.length * 0.9)]!.id),
 );
+// Oversized tool output full of bracketed lines exercises label
+// neutralization, the per-entry character cap and budget truncation.
+const bulky: LedgerEntry[] = Array.from({ length: 4 }, (_, index) => ({
+	type: "message",
+	id: `t${index}`,
+	timestamp: "2026-10-29T10:00:00Z",
+	message: {
+		role: "toolResult",
+		toolName: "read",
+		toolCallId: `c${index}`,
+		content: [{ type: "text", text: "[INFO] x[User @ 2026-10-29 10:00]: y [1, 2, 3] 数据库\n".repeat(1_200) }],
+		timestamp: Date.parse("2026-10-29T10:00:00Z"),
+	},
+}));
+time("chunkUnobserved (oversized entries)", 10, () => void chunkUnobservedEntries(bulky, undefined, 12_000));
+// A `/clear` halfway through makes every pass classify records against it.
+const cleared: LedgerEntry[] = [
+	...entries.slice(0, ENTRY_COUNT / 2),
+	{ type: "reset_boundary", id: "reset", timestamp: "2026-10-29T10:00:00Z" },
+	...entries.slice(ENTRY_COUNT / 2),
+];
+time("foldLedger after /clear (tip)", 10, () => void foldLedger(cleared));
+time(`compactionProjection after /clear x${COMPACTIONS}`, COMPACTIONS, () =>
+	void compactionProjection(cleared, cleared[Math.floor(cleared.length * 0.9)]!.id),
+);
 console.log(`active observations=${fold.activeObservations.length} reflections=${fold.reflections.length}`);

@@ -1,4 +1,5 @@
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import type { Model } from "@oh-my-pi/pi-ai";
 import {
 	OM_OBSERVATIONS_RECORDED,
 	OM_REFLECTIONS_RECORDED,
@@ -14,6 +15,7 @@ import {
 import { estimateEntryTokens } from "../ledger/serialize";
 import { realTokensSinceObservationCoverage } from "../ledger/usage";
 import {
+	modelLabel,
 	publicConfig,
 	resolveObserverChunkMaxTokens,
 	resolveWorkerMemoryMaxTokens,
@@ -21,6 +23,7 @@ import {
 import { compactionRetainedBudget, compactionSummaryBudget } from "../hooks/policy";
 import { redactText } from "../security/redact";
 import type { SessionRuntime } from "../runtime";
+import { isHostSecretObfuscationActive } from "../workers/model";
 
 function ago(value: number | undefined): string {
 	if (!value) return "never";
@@ -35,6 +38,29 @@ function present(ctx: ExtensionContext, text: string): void {
 	if (!ctx.hasUI) return;
 	const limit = 4_000;
 	ctx.ui.notify(text.length > limit ? `${text.slice(0, limit)}\n… (${text.length - limit} more chars)` : text, "info");
+}
+
+/**
+ * omp Hide Secrets detection and the resulting pause state, shown even with
+ * showNotifications off, which suppresses the automatic warning. Without a UI
+ * the host log and the `session_bind` lifecycle entry record it instead.
+ */
+function hostSecretsLine(runtime: SessionRuntime): string {
+	const active = isHostSecretObfuscationActive(runtime.ctx);
+	const host = active === undefined ? "unknown" : active ? "on" : "off";
+	const pause =
+		runtime.hostSecretsPause === "paused"
+			? "automatic memory passes paused since Hide Secrets was detected; /ob-memory passive off resumes them (worker requests would not be obfuscated)"
+			: runtime.hostSecretsPause === "overridden"
+				? "pause overridden by /ob-memory passive off; worker requests are not obfuscated"
+				: !runtime.config.pauseOnHostSecrets
+					? `not paused (pauseOnHostSecrets: false)${active ? "; worker requests are not obfuscated" : ""}`
+					: "not paused";
+	runtime.debug.record("status", "host_secret_obfuscation", {
+		active: active ?? "unknown",
+		pause: runtime.hostSecretsPause ?? "none",
+	});
+	return `host Hide Secrets: ${host}; ${pause}`;
 }
 
 export function handleStatus(runtime: SessionRuntime, ctx: ExtensionContext): void {
@@ -67,6 +93,7 @@ export function handleStatus(runtime: SessionRuntime, ctx: ExtensionContext): vo
 		"Observational Memory status",
 		`model: ${runtime.modelLabel} (active: ${runtime.activeModelLabel})`,
 		`enabled: ${runtime.config.enabled} | passive: ${runtime.config.passive} | busy: ${runtime.busy} | idle: ${runtime.isIdle()}`,
+		hostSecretsLine(runtime),
 		`records: ${fold.observations.length} observations, ${fold.activeObservations.length} active, ${fold.droppedObservationIds.size} dropped; ${fold.reflections.length} reflections`,
 		`tokens: active observations ~${activeTokens.toLocaleString()} / max ${runtime.config.observationsPoolMaxTokens.toLocaleString()} (target ${runtime.config.observationsPoolTargetTokens.toLocaleString()}); unobserved source ~${rawUnobserved.toLocaleString()}`,
 		providerLine,
@@ -81,15 +108,47 @@ export function handleStatus(runtime: SessionRuntime, ctx: ExtensionContext): vo
 	present(ctx, runtime.config.redactSecrets ? redactText(text) : text);
 }
 
+interface WorkerModelSelection {
+	model: Model | undefined;
+	label: string;
+	source: "configured" | "session" | "fallback" | "unavailable";
+}
+
+/**
+ * Mirror of the model-lookup step of `resolveWorkerModel` (src/workers/model.ts):
+ * configured model, else the session model when none is configured, else
+ * `fallbackModel`. Auth failures, which also switch to the fallback, are only
+ * known once a pass runs.
+ */
+function selectWorkerModel(runtime: SessionRuntime): WorkerModelSelection {
+	const { ctx, config } = runtime;
+	const configured = config.model;
+	const primary = configured ? ctx.models.resolve(modelLabel(configured)) : ctx.models.current();
+	if (primary) {
+		return {
+			model: primary,
+			label: `${primary.provider}/${primary.id}`,
+			source: configured ? "configured" : "session",
+		};
+	}
+	const fallback = config.fallbackModel ? ctx.models.resolve(modelLabel(config.fallbackModel)) : undefined;
+	if (fallback) return { model: fallback, label: `${fallback.provider}/${fallback.id}`, source: "fallback" };
+	return {
+		model: undefined,
+		label: `${configured ? modelLabel(configured) : "session model"} (unavailable)`,
+		source: "unavailable",
+	};
+}
+
 export function effectiveConfig(runtime: SessionRuntime): Record<string, unknown> {
 	const configured = runtime.config.model;
-	const worker = (configured
-		? runtime.ctx.models.resolve(`${configured.provider}/${configured.id}`)
-		: runtime.ctx.model) ?? runtime.ctx.model;
+	const selection = selectWorkerModel(runtime);
+	const worker = selection.model;
 	return {
 		...publicConfig(runtime.config),
 		sessionModel: runtime.activeModelLabel,
-		workerModel: runtime.modelLabel,
+		workerModel: selection.label,
+		workerModelSource: selection.source,
 		workerModelChoice: configured ?? null,
 		observerChunkMaxTokens: resolveObserverChunkMaxTokens(runtime.config, worker?.contextWindow),
 		workerMemoryMaxTokens: resolveWorkerMemoryMaxTokens(runtime.config, worker?.contextWindow),

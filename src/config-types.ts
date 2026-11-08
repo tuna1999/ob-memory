@@ -47,6 +47,11 @@ export interface ObMemoryConfig {
 	debugLog: boolean;
 	/** Show automatic warnings/status; explicit command output is always shown. */
 	showNotifications: boolean;
+	/**
+	 * Pause automatic memory passes for the session while omp's Hide Secrets
+	 * obfuscation is detected: worker requests cannot use it.
+	 */
+	pauseOnHostSecrets: boolean;
 }
 
 export const DEFAULT_CONFIG: ObMemoryConfig = {
@@ -67,6 +72,7 @@ export const DEFAULT_CONFIG: ObMemoryConfig = {
 	ownAutoCompaction: true,
 	debugLog: false,
 	showNotifications: true,
+	pauseOnHostSecrets: true,
 };
 
 export const THINKING_LEVELS: readonly ThinkingLevel[] = [

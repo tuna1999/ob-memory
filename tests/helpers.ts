@@ -177,3 +177,58 @@ export function scriptedComplete(scripts: AssistantMessage[]): typeof import("@o
 		return message;
 	}) as typeof import("@oh-my-pi/pi-ai").completeSimple;
 }
+
+/**
+ * Observer stand-in for multi-pass tests: each run records one observation
+ * citing the first source entry of the chunk in its prompt, then stops after
+ * the tool result. `hold(call)` can delay a call (1-based) to keep a pass in
+ * flight; `prompts` keeps every prompt it was sent.
+ */
+export function citingObserverComplete(hold?: (call: number) => Promise<void>): {
+	complete: typeof import("@oh-my-pi/pi-ai").completeSimple;
+	calls: () => number;
+	prompts: string[];
+} {
+	let calls = 0;
+	const prompts: string[] = [];
+	const complete = (async (_model: unknown, context: { messages: Array<{ role?: string }> }) => {
+		const call = ++calls;
+		const prompt = JSON.stringify(context.messages);
+		prompts.push(prompt);
+		if (hold) await hold(call);
+		if (context.messages.at(-1)?.role === "toolResult") return makeAssistant([text("Done.")]);
+		const chunk = prompt.split("NEW CONVERSATION CHUNK:").at(-1) ?? "";
+		const id = /\[Source entry id: ([^\]]+)\]/.exec(chunk)?.[1] ?? "missing";
+		return makeAssistant(
+			[
+				makeToolCall("record_observations", {
+					observations: [
+						{
+							timestamp: "2026-10-29 10:00",
+							content: `Billing migration step ${id} uses Postgres 16 with its own pool size.`,
+							relevance: "high",
+							sourceEntryIds: [id],
+						},
+					],
+				}),
+			],
+			"toolUse",
+		);
+	}) as unknown as typeof import("@oh-my-pi/pi-ai").completeSimple;
+	return { complete, calls: () => calls, prompts };
+}
+
+/** `count` alternating user/assistant source entries `m1`… of roughly 180 tokens each. */
+export function backlogEntries(count: number): LedgerEntry[] {
+	const entries: LedgerEntry[] = [];
+	for (let i = 1; i <= count; i++) {
+		entries.push(
+			messageEntry(
+				`m${i}`,
+				i % 2 ? "user" : "assistant",
+				`Turn ${i}: the billing service migration step ${i} uses Postgres 16, connection pool size ${i * 10}, and a retry budget of ${i} attempts. `.repeat(6),
+			),
+		);
+	}
+	return entries;
+}

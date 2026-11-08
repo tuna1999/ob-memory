@@ -49,10 +49,23 @@ export interface Reflection {
 	tokenCount: number;
 }
 
+/**
+ * Why an observation record carries no observations: the observer covered the
+ * chunk and found nothing new (`empty`), or it kept failing on the same chunk
+ * and the bounded retry gave up (`retry_limit`).
+ */
+export type ObservationCoverageReason = "empty" | "retry_limit";
+
+/**
+ * An observation record. `observations` may be empty: such a record is a
+ * coverage-only marker that advances the observer watermark without adding
+ * memory, so a chunk with nothing worth recording is not re-sent forever.
+ */
 export interface ObservationsRecordedData {
 	observations: Observation[];
 	coversUpToId: string;
 	createdAt?: string;
+	coverageReason?: ObservationCoverageReason;
 }
 
 export interface ReflectionsRecordedData {
@@ -141,7 +154,6 @@ export function isObservationsRecordedData(value: unknown): value is Observation
 	return (
 		isPlainRecord(value) &&
 		Array.isArray(value.observations) &&
-		value.observations.length > 0 &&
 		value.observations.every(isObservation) &&
 		isNonEmptyString(value.coversUpToId)
 	);
@@ -206,6 +218,15 @@ export function buildObservationsRecordedData(
 ): ObservationsRecordedData | undefined {
 	if (observations.length === 0 || !coversUpToId) return undefined;
 	return { observations, coversUpToId, createdAt: new Date().toISOString() };
+}
+
+/** Coverage-only observation record: advances the watermark without adding memory. */
+export function buildObservationCoverageData(
+	coversUpToId: string,
+	reason: ObservationCoverageReason,
+): ObservationsRecordedData | undefined {
+	if (!coversUpToId) return undefined;
+	return { observations: [], coversUpToId, createdAt: new Date().toISOString(), coverageReason: reason };
 }
 
 export function buildReflectionsRecordedData(
