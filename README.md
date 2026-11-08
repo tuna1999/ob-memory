@@ -102,8 +102,8 @@ Without `model`, memory workers use the active session model. A configured `fall
 
 | Command | Purpose |
 |---|---|
-| `/ob-memory view` | Memory the model can currently see: the latest compaction's records when it was memory-owned; after a newer native compaction it points to `view full`; with no compaction, or after a `/clear` newer than the latest compaction, the live ledger minus records cleared by that `/clear` |
-| `/ob-memory view full` | Full active ledger on the current branch, including records cleared by `/clear` (shown for audit, never sent to a model) |
+| `/ob-memory view` | Memory the model can currently see: the latest compaction's records when it was memory-owned; after a newer native compaction it points to `view full`; with no compaction, or after a `/clear` newer than the latest compaction, the live ledger minus records cleared by that `/clear`. The interactive view keeps the newest 120 lines (the header reports how many older lines were dropped) so large ledgers stay responsive. |
+| `/ob-memory view full` | Full active ledger on the current branch, including records cleared by `/clear` (shown for audit, never sent to a model); the interactive view keeps the newest 240 lines and reports the rest. |
 | `/ob-memory status` | Counts, coverage watermarks, pressure, drift, last run/error, omp Hide Secrets state and pause |
 | `/ob-memory observe-now` | Run one consolidation pass immediately (refused while paused for omp Hide Secrets) |
 | `/ob-memory passive on\|off` | Pause/resume automatic workers, compaction ownership and native-compaction memory context for this session (session only); `on` also stops the running pass |

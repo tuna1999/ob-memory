@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1
+
+### Commands
+
+- `/ob-memory view` and `/ob-memory view full` cap the interactive buffer at the newest 120 and 240 lines, with an omission count in the header and a note at the end of the buffer. The TUI editor lays out its whole buffer on every frame, so a large ledger made scrolling and typing slow (measured ~15 ms/frame at 280 lines and ~90 ms/frame at 1726 lines); `ob_recall` and the session file still hold every record.
+
 ## 0.4.0
 
 ### Privacy and redaction

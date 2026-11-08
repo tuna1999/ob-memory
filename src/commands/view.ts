@@ -5,10 +5,44 @@ import {
 	latestResetBoundaryIndex,
 	visibleProjection,
 } from "../ledger/fold";
-import { renderMemory } from "../ledger/render";
+import { MEMORY_HEADER, renderMemory } from "../ledger/render";
 import type { LedgerEntry } from "../ledger/types";
 import { redactText } from "../security/redact";
 import type { SessionRuntime } from "../runtime";
+
+/**
+ * Most record lines an interactive view hands to the host editor. omp's TUI
+ * editor lays out every buffer line on each frame and keeps a 256-line wrap
+ * cache, so a large ledger makes cursor movement and scrolling slow: 280 lines
+ * measured ~15ms per frame, 1726 lines ~90ms. The newest lines are the ones
+ * worth reading, so cap the buffer and count the rest.
+ */
+const VIEW_LINE_LIMIT = { visible: 120, full: 240 } as const;
+/** Header rows kept whole when older lines are dropped (MEMORY_HEADER, its blank row). */
+const VIEW_HEADER_LINES = MEMORY_HEADER.split("\n").length + 1;
+
+/**
+ * Keep the newest `limit` lines of a rendered memory text, preserving the
+ * explanatory header; report how many lines were dropped. A no-op when the
+ * text already fits or is empty.
+ */
+export function limitViewText(text: string, limit: number): { text: string; omitted: number } {
+	const lines = text.split("\n");
+	if (lines.length <= limit) return { text, omitted: 0 };
+	const headerRows = text.startsWith(MEMORY_HEADER) ? Math.min(VIEW_HEADER_LINES, Math.max(0, limit - 2)) : 0;
+	const header = lines.slice(0, headerRows);
+	const newestCount = Math.max(1, limit - header.length - 1);
+	const oldestKept = lines.length - newestCount;
+	const omitted = oldestKept - header.length;
+	return {
+		text: [
+			...header,
+			...lines.slice(oldestKept),
+			`… (${omitted} earlier lines omitted; showing the newest ${newestCount} record lines)`,
+		].join("\n"),
+		omitted,
+	};
+}
 
 async function present(ctx: ExtensionContext, text: string): Promise<void> {
 	if (ctx.hasUI && ctx.mode === "tui") {
@@ -41,10 +75,13 @@ export async function handleView(runtime: SessionRuntime, ctx: ExtensionContext,
 				estimate: runtime.estimator,
 			});
 	const scope = full ? "full ledger" : "visible memory";
+	const limit = full ? VIEW_LINE_LIMIT.full : VIEW_LINE_LIMIT.visible;
+	const limited = rendered.text ? limitViewText(rendered.text, limit) : { text: "", omitted: 0 };
 	const header =
 		`${scope}: ${projection.observations.length} active observations, ${projection.reflections.length} reflections` +
-		(projection.droppedObservationIds.length > 0 ? `, ${projection.droppedObservationIds.length} dropped ids` : "");
-	const text = `${header}\n\n${rendered.text || emptyViewMessage(entries, full)}`;
+		(projection.droppedObservationIds.length > 0 ? `, ${projection.droppedObservationIds.length} dropped ids` : "") +
+		(limited.omitted > 0 ? `; ${limited.omitted} older lines omitted` : "");
+	const text = `${header}\n\n${limited.text || emptyViewMessage(entries, full)}`;
 	await present(ctx, runtime.config.redactSecrets ? redactText(text) : text);
 }
 

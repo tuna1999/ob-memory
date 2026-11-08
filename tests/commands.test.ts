@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import type { completeSimple, Model } from "@oh-my-pi/pi-ai";
 import { handleMemoryCommand } from "../src/commands/control";
 import { handleConfig } from "../src/commands/status";
-import { handleView } from "../src/commands/view";
+import { handleView, limitViewText } from "../src/commands/view";
+import { MEMORY_HEADER } from "../src/ledger/render";
 import type { LedgerEntry } from "../src/ledger/types";
 import { resolveWorkerModel } from "../src/workers/model";
 import { consolidate, scheduleConsolidation } from "../src/workers/trigger";
@@ -53,6 +54,53 @@ describe("memory commands", () => {
 		const output = notifications.join("\n");
 		expect(output).not.toContain("dXNlcjpwYXNzd29yZA==");
 		expect(output).toContain("REDACTED AUTHORIZATION HEADER");
+	});
+});
+
+describe("view line limit", () => {
+	function rendered(lines: number): string {
+		return [MEMORY_HEADER, "", "## Observations", ...Array.from({ length: lines }, (_, i) => `record ${i}`)].join(
+			"\n",
+		);
+	}
+
+	test("keeps the header and the newest lines within the limit", () => {
+		const text = rendered(200);
+		const limited = limitViewText(text, 50);
+		const lines = limited.text.split("\n");
+		expect(lines.length).toBe(50);
+		expect(lines[0]).toBe(MEMORY_HEADER.split("\n")[0]);
+		expect(limited.text).toContain("record 199");
+		expect(limited.text).not.toContain("record 0\n");
+		expect(lines.at(-1)).toContain("earlier lines omitted");
+		expect(limited.omitted).toBeGreaterThan(0);
+	});
+
+	test("builds at most the limit plus its note line, even without a header", () => {
+		const limited = limitViewText("a\nb\nc\nd\ne", 3);
+		expect(limited.text.split("\n").length).toBeLessThanOrEqual(4);
+		expect(limited.text).toContain("e");
+	});
+
+	test("leaves a text that already fits untouched", () => {
+		expect(limitViewText("a\nb", 5)).toEqual({ text: "a\nb", omitted: 0 });
+	});
+
+	test("view reports the omitted lines for a ledger over the cap", async () => {
+		const { runtime, entries } = makeHarness();
+		entries.push(messageEntry("e1", "user", "source text"));
+		entries.push(
+			observationEntry(
+				"o1",
+				Array.from({ length: 130 }, (_, i) =>
+					observationRecord(i.toString(16).padStart(12, "0"), ["e1"], "e1", `observation ${i}`),
+				),
+				"e1",
+			),
+		);
+		const notifications = capture(runtime);
+		await handleView(runtime, runtime.ctx, "");
+		expect(notifications.join("\n")).toContain("older lines omitted");
 	});
 });
 
