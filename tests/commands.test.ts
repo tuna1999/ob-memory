@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { completeSimple, Model } from "@oh-my-pi/pi-ai";
 import { handleMemoryCommand } from "../src/commands/control";
 import { handleConfig } from "../src/commands/status";
-import { handleView, limitViewText } from "../src/commands/view";
+import { handleView, limitViewText, VIEW_LINE_LIMIT } from "../src/commands/view";
 import { MEMORY_HEADER } from "../src/ledger/render";
 import type { LedgerEntry } from "../src/ledger/types";
 import { resolveWorkerModel } from "../src/workers/model";
@@ -84,6 +84,15 @@ describe("view line limit", () => {
 
 	test("leaves a text that already fits untouched", () => {
 		expect(limitViewText("a\nb", 5)).toEqual({ text: "a\nb", omitted: 0 });
+	});
+
+	test("both caps plus the header stay under the editor's 256-line wrap cache", () => {
+		// Beyond 256 distinct lines the TUI editor clears its wrap cache on every
+		// frame and relayouts the whole buffer, which is the lag this cap avoids.
+		for (const limit of [VIEW_LINE_LIMIT.visible, VIEW_LINE_LIMIT.full]) {
+			expect(limitViewText(rendered(1_000), limit).text.split("\n").length).toBe(limit);
+			expect(limit + 2).toBeLessThanOrEqual(256);
+		}
 	});
 
 	test("view reports the omitted lines for a ledger over the cap", async () => {

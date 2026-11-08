@@ -12,12 +12,14 @@ import type { SessionRuntime } from "../runtime";
 
 /**
  * Most record lines an interactive view hands to the host editor. omp's TUI
- * editor lays out every buffer line on each frame and keeps a 256-line wrap
- * cache, so a large ledger makes cursor movement and scrolling slow: 280 lines
- * measured ~15ms per frame, 1726 lines ~90ms. The newest lines are the ones
- * worth reading, so cap the buffer and count the rest.
+ * editor lays out every buffer line on each frame and clears its wrap cache
+ * once a render needs 257 distinct lines, so a large ledger makes cursor
+ * movement and scrolling slow: measured on pi-tui 18.18.2, 256 lines render in
+ * 0.2ms per frame while 280 lines take 12.5ms and 658 lines 37ms. Both limits
+ * plus the two header lines stay under that cliff, and the newest lines are the
+ * ones worth reading, so cap the buffer and count the rest.
  */
-const VIEW_LINE_LIMIT = { visible: 120, full: 240 } as const;
+export const VIEW_LINE_LIMIT = { visible: 120, full: 240 } as const;
 /** Header rows kept whole when older lines are dropped (MEMORY_HEADER, its blank row). */
 const VIEW_HEADER_LINES = MEMORY_HEADER.split("\n").length + 1;
 
