@@ -91,8 +91,8 @@ Minimal example:
   "reflectAfterTokens": 4000,
   "observationsPoolMaxTokens": 16000,
   "compactionSummaryMaxTokens": 8000,
-  "model": "anthropic/claude-sonnet-4-6",
-  "fallbackModel": "openai/gpt-5.2"
+  "model": "anthropic/claude-sonnet-5-5",
+  "fallbackModel": "openai/gpt-6.1-sol"
 }
 ```
 
