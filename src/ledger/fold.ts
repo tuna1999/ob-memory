@@ -1,10 +1,12 @@
 import {
 	OM_OBSERVATIONS_DROPPED,
 	OM_OBSERVATIONS_RECORDED,
+	OM_REFLECTIONS_CONDENSED,
 	OM_REFLECTIONS_RECORDED,
 	isMemoryDetails,
 	isObservationsDroppedData,
 	isObservationsRecordedData,
+	isReflectionsCondensedData,
 	isReflectionsRecordedData,
 	type LedgerEntry,
 	type MemoryDetails,
@@ -15,9 +17,12 @@ import {
 export interface FoldedLedger {
 	observations: Observation[];
 	activeObservations: Observation[];
+	/** Active reflections: retired ones (condensed or obsolete) are left out. */
 	reflections: Reflection[];
 	droppedObservationIds: Set<string>;
+	retiredReflectionIds: Set<string>;
 	observationsById: Map<string, Observation>;
+	/** Every reflection on the branch, retired ones included. */
 	reflectionsById: Map<string, Reflection>;
 }
 
@@ -25,6 +30,7 @@ export interface Projection {
 	observations: Observation[];
 	reflections: Reflection[];
 	droppedObservationIds: string[];
+	retiredReflectionIds: string[];
 }
 
 export interface CompactionProjection extends Projection {
@@ -94,9 +100,10 @@ export function latestResetBoundaryIndex(entries: readonly LedgerEntry[], end = 
  * supporting observations is cleared. Such a mixed record loses its
  * post-boundary facts too; current workers never write one (the chunker
  * starts after the boundary and the reflector sees only surviving records).
- * Ids that are not on the branch neither keep nor clear a record. Drops are
- * tombstones and are unaffected. Cleared records stay in the session file for
- * audit (`fullProjection`).
+ * Ids that are not on the branch neither keep nor clear a record. Drops and
+ * reflection retirements are tombstones and are unaffected; a condensed
+ * replacement reflection is cleared like any other reflection record. Cleared
+ * records stay in the session file for audit (`fullProjection`).
  */
 export interface ResetView {
 	/** Index of the boundary in the entries, or -1 when there is none. */
@@ -156,8 +163,22 @@ export function reflectionSurvivesReset(
 /** Shared record selection for `foldLedger` and the projections. */
 interface FoldInputs {
 	observationsById: Map<string, Observation>;
+	/** Surviving reflections in pool order, retired ones included. */
 	reflectionsById: Map<string, Reflection>;
 	droppedObservationIds: Set<string>;
+	retiredReflectionIds: Set<string>;
+}
+
+/**
+ * Insert a condensed reflection where the oldest reflection it replaces sits,
+ * so the pool stays in rough chronological order instead of moving merged
+ * old facts to the end, where newest-first budgets would favour them.
+ */
+function insertCondensed(candidates: Reflection[], reflection: Reflection): void {
+	const sources = new Set(reflection.condensedFromIds);
+	const index = candidates.findIndex((candidate) => sources.has(candidate.id));
+	if (index < 0) candidates.push(reflection);
+	else candidates.splice(index, 0, reflection);
 }
 
 function selectRecords(
@@ -166,12 +187,13 @@ function selectRecords(
 	reset: ResetView,
 	includeObservations: (index: number, data: unknown) => boolean,
 	includeReflections: (index: number, data: unknown) => boolean,
-	includeDrops: (index: number, data: unknown) => boolean,
+	includeTombstones: (index: number, data: unknown) => boolean,
 ): FoldInputs {
 	const observationsById = new Map<string, Observation>();
 	const reflectionCandidates: Reflection[] = [];
 	const clearedObservationIds = new Set<string>();
 	const droppedObservationIds = new Set<string>();
+	const retiredReflectionIds = new Set<string>();
 	for (let i = 0; i <= end; i++) {
 		const entry = entries[i];
 		if (!entry || entry.type !== "custom") continue;
@@ -192,8 +214,19 @@ function selectRecords(
 			if (reset.keepsRecord(i, entry.data)) reflectionCandidates.push(...entry.data.reflections);
 			continue;
 		}
+		if (entry.customType === OM_REFLECTIONS_CONDENSED) {
+			// Condensing only restates reflections that already exist, so a run
+			// applies as one tombstone: its replacements come with its
+			// retirements, and a retirement never applies without them.
+			if (!isReflectionsCondensedData(entry.data) || !includeTombstones(i, entry.data)) continue;
+			if (reset.keepsRecord(i, entry.data)) {
+				for (const reflection of entry.data.reflections) insertCondensed(reflectionCandidates, reflection);
+			}
+			for (const id of entry.data.retiredReflectionIds) retiredReflectionIds.add(id);
+			continue;
+		}
 		if (entry.customType === OM_OBSERVATIONS_DROPPED) {
-			if (!isObservationsDroppedData(entry.data) || !includeDrops(i, entry.data)) continue;
+			if (!isObservationsDroppedData(entry.data) || !includeTombstones(i, entry.data)) continue;
 			for (const id of entry.data.observationIds) droppedObservationIds.add(id);
 		}
 	}
@@ -203,34 +236,34 @@ function selectRecords(
 		if (!reflectionSurvivesReset(reflection, clearedObservationIds, observationsById)) continue;
 		reflectionsById.set(reflection.id, reflection);
 	}
-	return { observationsById, reflectionsById, droppedObservationIds };
+	return { observationsById, reflectionsById, droppedObservationIds, retiredReflectionIds };
+}
+
+function activeReflections(inputs: FoldInputs): Reflection[] {
+	return Array.from(inputs.reflectionsById.values()).filter((reflection) => !inputs.retiredReflectionIds.has(reflection.id));
 }
 
 const ALWAYS = (): boolean => true;
 
 /**
  * Fold valid ledger records from the branch root through `upToEntryId`.
- * First valid record wins by id; drops are tombstones and are retained even
- * when the dropped observation has not been seen yet. Records cleared by the
- * latest `/clear` at or before the boundary are excluded (see `ResetView`):
- * this fold feeds worker prompts and the native-compaction fallback.
+ * First valid record wins by id; drops and reflection retirements are
+ * tombstones and are retained even when the record has not been seen yet.
+ * Records cleared by the latest `/clear` at or before the boundary are
+ * excluded (see `ResetView`): this fold feeds worker prompts and the
+ * native-compaction fallback.
  */
 export function foldLedger(entries: readonly LedgerEntry[], upToEntryId?: string): FoldedLedger {
 	const end = boundaryIndex(entries, upToEntryId);
-	const { observationsById, reflectionsById, droppedObservationIds } = selectRecords(
-		entries,
-		end,
-		resetView(entries, end),
-		ALWAYS,
-		ALWAYS,
-		ALWAYS,
-	);
+	const inputs = selectRecords(entries, end, resetView(entries, end), ALWAYS, ALWAYS, ALWAYS);
+	const { observationsById, reflectionsById, droppedObservationIds, retiredReflectionIds } = inputs;
 	const observations = Array.from(observationsById.values());
 	return {
 		observations,
 		activeObservations: observations.filter((observation) => !droppedObservationIds.has(observation.id)),
-		reflections: Array.from(reflectionsById.values()),
+		reflections: activeReflections(inputs),
 		droppedObservationIds,
+		retiredReflectionIds,
 		observationsById,
 		reflectionsById,
 	};
@@ -240,27 +273,30 @@ function project(
 	entries: readonly LedgerEntry[],
 	observationsBoundary: number,
 	reflectionsBoundary: number,
-	dropsBoundary: number,
+	tombstonesBoundary: number,
 	excludeCleared: boolean,
 ): Projection {
 	const indexes = entryIndexMap(entries);
-	// A tombstone is a decision about a live observation, not source context.
-	// At the tip every recorded drop applies, even when its coverage watermark
-	// is ahead of the observation boundary (otherwise a drop recorded just
-	// before compaction could be ignored and the observation resurrected).
-	const applyAllDrops = dropsBoundary >= entries.length - 1;
-	const { observationsById, reflectionsById, droppedObservationIds } = selectRecords(
+	// A tombstone is a decision about a live record, not source context. At
+	// the tip every recorded drop and condense run applies, even when its
+	// coverage watermark is ahead of the observation boundary (otherwise a
+	// tombstone recorded just before compaction could be ignored and the
+	// record resurrected).
+	const applyAllTombstones = tombstonesBoundary >= entries.length - 1;
+	const inputs = selectRecords(
 		entries,
 		entries.length - 1,
 		excludeCleared ? resetView(entries, entries.length - 1, indexes) : NO_RESET,
 		(_index, data) => isCoveredAtOrBefore(data, indexes, observationsBoundary),
 		(_index, data) => isCoveredAtOrBefore(data, indexes, reflectionsBoundary),
-		(_index, data) => applyAllDrops || isCoveredAtOrBefore(data, indexes, dropsBoundary),
+		(_index, data) => applyAllTombstones || isCoveredAtOrBefore(data, indexes, tombstonesBoundary),
 	);
+	const { observationsById, droppedObservationIds, retiredReflectionIds } = inputs;
 	return {
 		observations: Array.from(observationsById.values()).filter((observation) => !droppedObservationIds.has(observation.id)),
-		reflections: Array.from(reflectionsById.values()),
+		reflections: activeReflections(inputs),
 		droppedObservationIds: Array.from(droppedObservationIds),
+		retiredReflectionIds: Array.from(retiredReflectionIds),
 	};
 }
 
@@ -321,11 +357,14 @@ export function visibleProjection(entries: readonly LedgerEntry[]): Projection {
 	// older ob-memory compaction would label records as visible when the model
 	// can no longer see them.
 	const details = latestCompactionDetails(entries);
-	if (!details) return { observations: [], reflections: [], droppedObservationIds: [] };
+	if (!details) return { observations: [], reflections: [], droppedObservationIds: [], retiredReflectionIds: [] };
+	// The stored reflections are the active pool at that compaction: retired
+	// ones were already left out.
 	return {
 		observations: details.observations.filter((observation) => !details.droppedObservationIds.includes(observation.id)),
 		reflections: details.reflections,
 		droppedObservationIds: details.droppedObservationIds,
+		retiredReflectionIds: [],
 	};
 }
 

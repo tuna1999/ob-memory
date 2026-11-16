@@ -4,6 +4,7 @@ export const EXTENSION_VERSION = "0.4.1";
 export const OM_OBSERVATIONS_RECORDED = "ob-memory.observations.recorded";
 export const OM_REFLECTIONS_RECORDED = "ob-memory.reflections.recorded";
 export const OM_OBSERVATIONS_DROPPED = "ob-memory.observations.dropped";
+export const OM_REFLECTIONS_CONDENSED = "ob-memory.reflections.condensed";
 export const OM_FOLDED = "ob-memory.folded";
 export const OM_LIFECYCLE = "ob-memory.lifecycle";
 
@@ -18,8 +19,9 @@ export const MAX_SOURCE_ENTRY_CHARS = 40_000;
 
 /**
  * Minimum share of a reflector/dropper memory budget reserved for observations,
- * mirroring the summary renderer. Reflections are never pruned, so without a
- * reserve they would eventually starve the workers of the records they act on.
+ * mirroring the summary renderer. Reflections shrink only when the condenser
+ * runs, so without a reserve they could starve the workers of the records they
+ * act on.
  */
 export const WORKER_OBSERVATIONS_MIN_SHARE = 0.5;
 

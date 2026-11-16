@@ -1,6 +1,7 @@
 import type { ExtensionContext, SessionCompactingEvent, SessionCompactingResult } from "@oh-my-pi/pi-coding-agent";
 import {
 	OM_OBSERVATIONS_RECORDED,
+	OM_REFLECTIONS_CONDENSED,
 	OM_REFLECTIONS_RECORDED,
 	isObservationsRecordedData,
 	type LedgerEntry,
@@ -37,7 +38,8 @@ function ledgerEntriesAfter(entries: readonly LedgerEntry[], index: number): num
 			(entry.customType === OM_OBSERVATIONS_RECORDED &&
 				isObservationsRecordedData(entry.data) &&
 				entry.data.observations.length > 0) ||
-			entry.customType === OM_REFLECTIONS_RECORDED
+			entry.customType === OM_REFLECTIONS_RECORDED ||
+			entry.customType === OM_REFLECTIONS_CONDENSED
 		) {
 			count++;
 		}

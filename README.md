@@ -8,6 +8,7 @@ No vector database. No per-turn retrieval. No second copy of the transcript. Tes
 
 - **Observer** distills unobserved conversation chunks into timestamped, relevance-rated observations. Every observation cites the exact source entry ids that support it.
 - **Reflector** crystallizes stable, durable facts from active observations into reflections.
+- **Condenser** keeps the reflection pool inside its budget. When reflections exceed `reflectionsPoolMaxTokens`, it merges overlapping older reflections into one shorter line per subject and retires obsolete ones (transient task state, finished chores, facts a later reflection replaced); the newest reflections stay verbatim. Each merged line is checked by the worker model against the original reflections behind it and rejected if it changes what they say. A merged reflection keeps the union of its sources' supporting observations, and a reflection backed by a critical observation can be merged but never retired. Retirements are ledger tombstones; retired reflections stay recallable.
 - **Dropper** retires observations when the pool exceeds its budget. Low/medium relevance records may be dropped without reflection coverage; high relevance needs reflection coverage, and critical records are never drop candidates. Drops are ledger tombstones, not history deletion.
 - **Compaction ownership** replaces omp's native summary with a deterministic memory render when the ledger covers the summarized range. If the observer has not covered the cut, the plugin retains the unobserved tail or delegates to native compaction.
 - **`ob_recall`** recovers one exact observation/reflection id plus its source evidence. It is a provenance tool, not semantic search.
@@ -19,6 +20,7 @@ The ledger is stored as ordinary omp session entries:
 ob-memory.observations.recorded
 ob-memory.reflections.recorded
 ob-memory.observations.dropped
+ob-memory.reflections.condensed
 ob-memory.folded          (compaction details)
 ```
 

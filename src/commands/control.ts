@@ -37,7 +37,7 @@ export async function handleObserveNow(
 	}
 	const result = await consolidate(runtime, "manual", { force: true });
 	const summary =
-		`observations +${result.observed}, reflections +${result.reflected}, drops +${result.dropped}` +
+		`observations +${result.observed}, reflections +${result.reflected}, reflections condensed ${result.condensed}, drops +${result.dropped}` +
 		(result.skipped ? `; skipped: ${result.skipped}` : "");
 	if (ctx.hasUI) ctx.ui.notify(`Observational memory: ${summary}`, result.skipped === "failed" ? "warning" : "info");
 }

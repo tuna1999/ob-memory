@@ -622,6 +622,7 @@ describe("integration wiring", () => {
 			observations: [kept],
 			reflections: [],
 			droppedObservationIds: [dropped.id],
+			retiredReflectionIds: [],
 		});
 
 		const { runtime, ctx, entries, notifications } = harness();

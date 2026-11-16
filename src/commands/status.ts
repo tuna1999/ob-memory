@@ -10,6 +10,7 @@ import {
 	latestCoverageIndex,
 	observationTokens,
 	rawTokensAfterIndex,
+	reflectionTokens,
 	visibleProjection,
 } from "../ledger/fold";
 import { estimateEntryTokens } from "../ledger/serialize";
@@ -85,6 +86,7 @@ export function handleStatus(runtime: SessionRuntime, ctx: ExtensionContext): vo
 					? `provider context: ~${currentContextTokens.toLocaleString()} tokens now; delta since the latest memory anchor unavailable`
 					: `provider context: ~${currentContextTokens.toLocaleString()} tokens now; ~${providerDelta.toLocaleString()} since the latest memory anchor`;
 	const activeTokens = observationTokens(fold.activeObservations);
+	const activeReflectionTokens = reflectionTokens(fold.reflections);
 	const visibleIds = new Set(visible.observations.map((observation) => observation.id));
 	const visibleReflectionIds = new Set(visible.reflections.map((reflection) => reflection.id));
 	const onlyFullObservations = fold.activeObservations.filter((observation) => !visibleIds.has(observation.id)).length;
@@ -94,12 +96,12 @@ export function handleStatus(runtime: SessionRuntime, ctx: ExtensionContext): vo
 		`model: ${runtime.modelLabel} (active: ${runtime.activeModelLabel})`,
 		`enabled: ${runtime.config.enabled} | passive: ${runtime.config.passive} | busy: ${runtime.busy} | idle: ${runtime.isIdle()}`,
 		hostSecretsLine(runtime),
-		`records: ${fold.observations.length} observations, ${fold.activeObservations.length} active, ${fold.droppedObservationIds.size} dropped; ${fold.reflections.length} reflections`,
-		`tokens: active observations ~${activeTokens.toLocaleString()} / max ${runtime.config.observationsPoolMaxTokens.toLocaleString()} (target ${runtime.config.observationsPoolTargetTokens.toLocaleString()}); unobserved source ~${rawUnobserved.toLocaleString()}`,
+		`records: ${fold.observations.length} observations, ${fold.activeObservations.length} active, ${fold.droppedObservationIds.size} dropped; ${fold.reflections.length} active reflections, ${fold.retiredReflectionIds.size} retired`,
+		`tokens: active observations ~${activeTokens.toLocaleString()} / max ${runtime.config.observationsPoolMaxTokens.toLocaleString()} (target ${runtime.config.observationsPoolTargetTokens.toLocaleString()}); active reflections ~${activeReflectionTokens.toLocaleString()} / max ${runtime.config.reflectionsPoolMaxTokens.toLocaleString()} (target ${runtime.config.reflectionsPoolTargetTokens.toLocaleString()}); unobserved source ~${rawUnobserved.toLocaleString()}`,
 		providerLine,
 		`coverage: observations OBM ${latestCoverageId(entries, OM_OBSERVATIONS_RECORDED) ?? "none"}; reflections ${latestCoverageId(entries, OM_REFLECTIONS_RECORDED) ?? "none"}`,
 		`visible projection: ${visible.observations.length} observations, ${visible.reflections.length} reflections; drift +${onlyFullObservations} observations / +${onlyFullReflections} reflections only in full ledger`,
-		`last: observer ${ago(runtime.lastObserverAt)}; reflector ${ago(runtime.lastReflectorAt)}; dropper ${ago(runtime.lastDropperAt)}; compaction ${ago(runtime.lastCompactionAt)}`,
+		`last: observer ${ago(runtime.lastObserverAt)}; reflector ${ago(runtime.lastReflectorAt)}; condenser ${ago(runtime.lastCondenserAt)}; dropper ${ago(runtime.lastDropperAt)}; compaction ${ago(runtime.lastCompactionAt)}`,
 		`last compaction owned: ${runtime.lastCompactionOwned === undefined ? "none" : String(runtime.lastCompactionOwned)}`,
 		`last error: ${runtime.lastError ? `${runtime.lastError.stage}: ${runtime.lastError.message} (${ago(runtime.lastError.at)})` : "none"}`,
 		`config: ${JSON.stringify(publicConfig(runtime.config))}`,

@@ -3,6 +3,7 @@ import {
 	OBSERVATION_TIMESTAMP_PATTERN,
 	OM_OBSERVATIONS_DROPPED,
 	OM_OBSERVATIONS_RECORDED,
+	OM_REFLECTIONS_CONDENSED,
 	OM_REFLECTIONS_RECORDED,
 	RELEVANCE_VALUES,
 	estimateTextTokens,
@@ -12,6 +13,7 @@ import {
 export {
 	OM_OBSERVATIONS_DROPPED,
 	OM_OBSERVATIONS_RECORDED,
+	OM_REFLECTIONS_CONDENSED,
 	OM_REFLECTIONS_RECORDED,
 } from "../constants";
 export type { Relevance };
@@ -47,6 +49,18 @@ export interface Reflection {
 	content: string;
 	supportingObservationIds: string[];
 	tokenCount: number;
+	/**
+	 * Set only on a reflection written by the condenser: the reflections it
+	 * merged (and retired). Its `supportingObservationIds` are their union.
+	 */
+	condensedFromIds?: string[];
+	/**
+	 * Condense tier of a condenser-written reflection: 1 above its highest
+	 * source (a reflection the reflector wrote is tier 0). The condenser works
+	 * through the lowest tier first, so a line is distilled again only after
+	 * every line of its tier has had its turn.
+	 */
+	tier?: number;
 }
 
 /**
@@ -70,6 +84,21 @@ export interface ObservationsRecordedData {
 
 export interface ReflectionsRecordedData {
 	reflections: Reflection[];
+	coversUpToId: string;
+	createdAt?: string;
+}
+
+/**
+ * A condenser run: `reflections` replace the reflections each one names in
+ * `condensedFromIds`, and every id in `retiredReflectionIds` leaves the active
+ * pool (merged into a replacement, or obsolete when no replacement names it).
+ * Retirements are tombstones like observation drops: the retired records stay
+ * in the session file and remain recallable. Replacements and retirements
+ * share one entry so a fold never sees half of a run.
+ */
+export interface ReflectionsCondensedData {
+	reflections: Reflection[];
+	retiredReflectionIds: string[];
 	coversUpToId: string;
 	createdAt?: string;
 }
@@ -146,8 +175,20 @@ export function isReflection(value: unknown): value is Reflection {
 		isNonEmptyString(value.content) &&
 		!value.content.includes("\n") &&
 		isNonEmptyStringArray(value.supportingObservationIds) &&
-		isTokenCount(value.tokenCount)
+		isTokenCount(value.tokenCount) &&
+		(value.condensedFromIds === undefined || isMemoryIdList(value.condensedFromIds)) &&
+		(value.tier === undefined || (Number.isInteger(value.tier) && (value.tier as number) >= 1))
 	);
+}
+
+/** Condense tier: 0 for a reflector record; a condensed record without one predates tiers and counts as 1. */
+export function reflectionTier(reflection: Pick<Reflection, "condensedFromIds" | "tier">): number {
+	if (!reflection.condensedFromIds) return 0;
+	return reflection.tier ?? 1;
+}
+
+function isMemoryIdList(value: unknown): value is string[] {
+	return isNonEmptyStringArray(value) && value.every(isMemoryId);
 }
 
 export function isObservationsRecordedData(value: unknown): value is ObservationsRecordedData {
@@ -166,6 +207,23 @@ export function isReflectionsRecordedData(value: unknown): value is ReflectionsR
 		value.reflections.length > 0 &&
 		value.reflections.every(isReflection) &&
 		isNonEmptyString(value.coversUpToId)
+	);
+}
+
+export function isReflectionsCondensedData(value: unknown): value is ReflectionsCondensedData {
+	if (
+		!isPlainRecord(value) ||
+		!Array.isArray(value.reflections) ||
+		!value.reflections.every(isReflection) ||
+		!isMemoryIdList(value.retiredReflectionIds) ||
+		!isNonEmptyString(value.coversUpToId)
+	) {
+		return false;
+	}
+	const retired = new Set(value.retiredReflectionIds);
+	return value.reflections.every(
+		(reflection) =>
+			reflection.condensedFromIds !== undefined && reflection.condensedFromIds.every((id) => retired.has(id)),
 	);
 }
 
@@ -206,6 +264,12 @@ export function isReflectionsRecordedEntry(
 	return entry.type === "custom" && entry.customType === OM_REFLECTIONS_RECORDED && isReflectionsRecordedData(entry.data);
 }
 
+export function isReflectionsCondensedEntry(
+	entry: LedgerEntry,
+): entry is LedgerEntry & { customType: string; data: ReflectionsCondensedData } {
+	return entry.type === "custom" && entry.customType === OM_REFLECTIONS_CONDENSED && isReflectionsCondensedData(entry.data);
+}
+
 export function isObservationsDroppedEntry(
 	entry: LedgerEntry,
 ): entry is LedgerEntry & { customType: string; data: ObservationsDroppedData } {
@@ -235,6 +299,16 @@ export function buildReflectionsRecordedData(
 ): ReflectionsRecordedData | undefined {
 	if (reflections.length === 0 || !coversUpToId) return undefined;
 	return { reflections, coversUpToId, createdAt: new Date().toISOString() };
+}
+
+export function buildReflectionsCondensedData(
+	reflections: Reflection[],
+	retiredReflectionIds: string[],
+	coversUpToId: string,
+): ReflectionsCondensedData | undefined {
+	if (retiredReflectionIds.length === 0 || !coversUpToId) return undefined;
+	const data = { reflections, retiredReflectionIds, coversUpToId, createdAt: new Date().toISOString() };
+	return isReflectionsCondensedData(data) ? data : undefined;
 }
 
 export function buildObservationsDroppedData(

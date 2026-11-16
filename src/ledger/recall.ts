@@ -3,8 +3,10 @@ import { redactText } from "../security/redact";
 import { reflectionSurvivesReset, resetView, type ResetView } from "./fold";
 import { serializeSourceEntries } from "./serialize";
 import {
+	OM_REFLECTIONS_CONDENSED,
 	isObservationsDroppedData,
 	isObservationsRecordedData,
+	isReflectionsCondensedData,
 	isReflectionsRecordedData,
 	type LedgerEntry,
 	type Observation,
@@ -56,12 +58,15 @@ function indexLedger(entries: readonly LedgerEntry[], reset: ResetView): {
 	observations: IndexedObservation[];
 	reflections: IndexedReflection[];
 	dropped: Set<string>;
+	/** Retired reflection id → the condensed reflection that replaced it, if any. */
+	retired: Map<string, string | undefined>;
 	clearedObservationIds: Set<string>;
 	clearedReflectionIds: Set<string>;
 } {
 	const observations: IndexedObservation[] = [];
 	const candidates: IndexedReflection[] = [];
 	const dropped = new Set<string>();
+	const retired = new Map<string, string | undefined>();
 	const clearedObservationIds = new Set<string>();
 	const clearedReflectionIds = new Set<string>();
 	for (let index = 0; index < entries.length; index++) {
@@ -93,6 +98,24 @@ function indexLedger(entries: readonly LedgerEntry[], reset: ResetView): {
 			}
 			continue;
 		}
+		if (entry.customType === OM_REFLECTIONS_CONDENSED) {
+			if (!isReflectionsCondensedData(entry.data)) continue;
+			const keepsRecord = reset.keepsRecord(index, entry.data);
+			for (let i = 0; i < entry.data.reflections.length; i++) {
+				const reflection = entry.data.reflections[i]!;
+				if (!keepsRecord) {
+					clearedReflectionIds.add(reflection.id);
+					continue;
+				}
+				candidates.push({ reflection, entryId: entry.id, recordIndex: i });
+			}
+			for (const id of entry.data.retiredReflectionIds) {
+				if (retired.has(id)) continue;
+				const replacement = entry.data.reflections.find((reflection) => reflection.condensedFromIds?.includes(id));
+				retired.set(id, replacement?.id);
+			}
+			continue;
+		}
 		if (entry.customType === "ob-memory.observations.dropped") {
 			if (!isObservationsDroppedData(entry.data)) continue;
 			for (const id of entry.data.observationIds) dropped.add(id);
@@ -104,7 +127,13 @@ function indexLedger(entries: readonly LedgerEntry[], reset: ResetView): {
 		clearedReflectionIds.add(item.reflection.id);
 		return false;
 	});
-	return { observations, reflections, dropped, clearedObservationIds, clearedReflectionIds };
+	return { observations, reflections, dropped, retired, clearedObservationIds, clearedReflectionIds };
+}
+
+function reflectionStatus(id: string, retired: ReadonlyMap<string, string | undefined>): string {
+	if (!retired.has(id)) return "active";
+	const replacement = retired.get(id);
+	return replacement ? `retired, merged into ${replacement}` : "retired";
 }
 
 function unique<T>(values: readonly T[]): T[] {
@@ -128,7 +157,7 @@ export function recallMemory(
 	options: RecallOptions = {},
 ): RecallResult {
 	const reset = resetView(entries);
-	const { observations, reflections, dropped, clearedObservationIds, clearedReflectionIds } = indexLedger(entries, reset);
+	const { observations, reflections, dropped, retired, clearedObservationIds, clearedReflectionIds } = indexLedger(entries, reset);
 	const directObservations = observations.filter((item) => item.observation.id === memoryId);
 	const directReflections = reflections.filter((item) => item.reflection.id === memoryId);
 	if (directObservations.length === 0 && directReflections.length === 0) {
@@ -236,8 +265,11 @@ export function recallMemory(
 	}
 	if (directReflections.length > 0) {
 		for (const item of directReflections) {
-			lines.push(`Reflection [${item.reflection.id}] ${item.reflection.content}`);
+			lines.push(`Reflection [${item.reflection.id}] [${reflectionStatus(item.reflection.id, retired)}] ${item.reflection.content}`);
 			lines.push(`  support: ${item.reflection.supportingObservationIds.join(", ")}`);
+			if (item.reflection.condensedFromIds) {
+				lines.push(`  condensed from: ${item.reflection.condensedFromIds.join(", ")}`);
+			}
 		}
 	}
 	if (selectedObservations.size > 0 && directObservations.length === 0) {

@@ -55,6 +55,17 @@ describe("config", () => {
 		expect(warnings.length).toBeGreaterThanOrEqual(3);
 	});
 
+	test("condenserCheck defaults on and is set from files and OB_MEMORY_CONDENSER_CHECK", () => {
+		const cwd = tempDir();
+		const agentDir = tempDir();
+		expect(loadConfig({ cwd, agentDir, env: {} }).config.condenserCheck).toBe(true);
+		writeFileSync(join(agentDir, "ob-memory.json"), JSON.stringify({ condenserCheck: false }));
+		const fromFile = loadConfig({ cwd, agentDir, env: {} });
+		expect(fromFile.config.condenserCheck).toBe(false);
+		expect(fromFile.warnings).toEqual([]);
+		expect(loadConfig({ cwd, agentDir, env: { OB_MEMORY_CONDENSER_CHECK: "true" } }).config.condenserCheck).toBe(true);
+	});
+
 	test("pauseOnHostSecrets defaults on and is set from files and OB_MEMORY_PAUSE_ON_HOST_SECRETS", () => {
 		const cwd = tempDir();
 		const agentDir = tempDir();
@@ -235,5 +246,40 @@ describe("numeric string parsing", () => {
 		expect(loaded.config.compactionCatchUpMaxChunks).toBe(0);
 		expect(loaded.config.agentMaxTurns).toBe(4);
 		expect(loaded.warnings).toEqual([]);
+	});
+});
+
+describe("reflection pool budget", () => {
+	test("defaults put the target below the max and the max inside half of a 16k summary budget", () => {
+		expect(DEFAULT_CONFIG.reflectionsPoolTargetTokens).toBeLessThan(DEFAULT_CONFIG.reflectionsPoolMaxTokens);
+		expect(DEFAULT_CONFIG.reflectionsPoolMaxTokens).toBeLessThanOrEqual(8_000);
+	});
+
+	test("is set from files and OB_MEMORY_REFLECTIONS_POOL_* env vars", () => {
+		const cwd = tempDir();
+		const agentDir = tempDir();
+		writeFileSync(join(agentDir, "ob-memory.json"), JSON.stringify({ reflectionsPoolMaxTokens: 9_000, reflectionsPoolTargetTokens: 7_000 }));
+		const fromFile = loadConfig({ cwd, agentDir, env: {} });
+		expect(fromFile.config.reflectionsPoolMaxTokens).toBe(9_000);
+		expect(fromFile.config.reflectionsPoolTargetTokens).toBe(7_000);
+		expect(fromFile.warnings).toEqual([]);
+		const fromEnv = loadConfig({
+			cwd,
+			agentDir,
+			env: { OB_MEMORY_REFLECTIONS_POOL_MAX_TOKENS: "12000", OB_MEMORY_REFLECTIONS_POOL_TARGET_TOKENS: "8000" },
+		});
+		expect(fromEnv.config.reflectionsPoolMaxTokens).toBe(12_000);
+		expect(fromEnv.config.reflectionsPoolTargetTokens).toBe(8_000);
+	});
+
+	test("clamps the target to the max on the merged config", () => {
+		const cwd = tempDir();
+		const agentDir = tempDir();
+		writeFileSync(join(agentDir, "ob-memory.json"), JSON.stringify({ reflectionsPoolTargetTokens: 9_000 }));
+		const warnings: string[] = [];
+		const loaded = loadConfig({ cwd, agentDir, env: { OB_MEMORY_REFLECTIONS_POOL_MAX_TOKENS: "3000" }, warn: (message) => warnings.push(message) });
+		expect(loaded.config.reflectionsPoolMaxTokens).toBe(3_000);
+		expect(loaded.config.reflectionsPoolTargetTokens).toBe(3_000);
+		expect(warnings.some((warning) => warning.startsWith("environment: reflectionsPoolTargetTokens"))).toBe(true);
 	});
 });

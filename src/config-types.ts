@@ -20,6 +20,10 @@ export interface ObMemoryConfig {
 	observationsPoolMaxTokens: number;
 	/** Soft active-observation target used by the dropper. */
 	observationsPoolTargetTokens: number;
+	/** Active-reflection pool size above which the condenser is considered. */
+	reflectionsPoolMaxTokens: number;
+	/** Soft active-reflection target that sizes the condenser's retirement limit. */
+	reflectionsPoolTargetTokens: number;
 	/** Maximum rendered size of the memory summary. Unset derives from the context window. */
 	compactionSummaryMaxTokens?: number;
 	/** Maximum raw tail retained when the observer has not covered the proposed cut. */
@@ -52,6 +56,12 @@ export interface ObMemoryConfig {
 	 * obfuscation is detected: worker requests cannot use it.
 	 */
 	pauseOnHostSecrets: boolean;
+	/**
+	 * Check each condenser merge against the original reflections behind it
+	 * with one more worker request per condenser call, and reject merges that
+	 * change what those reflections say.
+	 */
+	condenserCheck: boolean;
 }
 
 export const DEFAULT_CONFIG: ObMemoryConfig = {
@@ -60,6 +70,8 @@ export const DEFAULT_CONFIG: ObMemoryConfig = {
 	reflectAfterTokens: 4_000,
 	observationsPoolMaxTokens: 16_000,
 	observationsPoolTargetTokens: 10_000,
+	reflectionsPoolMaxTokens: 7_500,
+	reflectionsPoolTargetTokens: 5_500,
 	compactionCatchUpMaxChunks: 2,
 	compactionCatchUpBudgetMs: 18_000,
 	agentMaxTurns: 8,
@@ -73,6 +85,7 @@ export const DEFAULT_CONFIG: ObMemoryConfig = {
 	debugLog: false,
 	showNotifications: true,
 	pauseOnHostSecrets: true,
+	condenserCheck: true,
 };
 
 export const THINKING_LEVELS: readonly ThinkingLevel[] = [

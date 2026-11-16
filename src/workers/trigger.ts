@@ -2,10 +2,12 @@ import type { completeSimple } from "@oh-my-pi/pi-ai";
 import {
 	OM_OBSERVATIONS_DROPPED,
 	OM_OBSERVATIONS_RECORDED,
+	OM_REFLECTIONS_CONDENSED,
 	OM_REFLECTIONS_RECORDED,
 	buildObservationCoverageData,
 	buildObservationsDroppedData,
 	buildObservationsRecordedData,
+	buildReflectionsCondensedData,
 	buildReflectionsRecordedData,
 	type LedgerEntry,
 	type Observation,
@@ -19,12 +21,14 @@ import {
 	latestResetBoundaryIndex,
 	observationTokens,
 	rawTokensAfterIndex,
+	reflectionTokens,
 	type FoldedLedger,
 } from "../ledger/fold";
 import { chunkUnobservedEntries, estimateEntryTokens, type SourceChunk } from "../ledger/serialize";
 import { realTokensSinceObservationCoverage } from "../ledger/usage";
 import { resolveObserverChunkMaxTokens } from "../config";
 import type { BranchFingerprint, SessionRuntime } from "../runtime";
+import { runCondenser, type CondenseResult } from "./condenser";
 import { runDropper } from "./dropper";
 import { resolveWorkerModel, type ResolvedWorkerModel } from "./model";
 import { runObserver, type ObserverRunOutcome } from "./observer";
@@ -54,6 +58,8 @@ const BUSY_RETRY_DELAY_MS = 1_000;
 export interface ConsolidationResult {
 	observed: number;
 	reflected: number;
+	/** Reflections retired by the condenser (merged into a shorter line or obsolete). */
+	condensed: number;
 	dropped: number;
 	skipped?: string;
 }
@@ -148,6 +154,49 @@ export function isReflectionGated(
 	if (!gate || !appliesToBranch(entries, gate)) return false;
 	const threshold = Math.max(1_000, Math.floor(runtime.config.reflectAfterTokens / 2));
 	return observationTokens(fold.observations) - gate.recordedTokens < threshold;
+}
+
+/** Every reflection recorded on the branch since the latest `/clear`, retired ones included. */
+function recordedReflectionTokens(fold: FoldedLedger): number {
+	return reflectionTokens(Array.from(fold.reflectionsById.values()));
+}
+
+/**
+ * A condenser run that shrinks the active pool by less than this is treated
+ * like a declined one and gates further automatic runs.
+ */
+export const CONDENSE_MIN_PROGRESS_TOKENS = 200;
+
+/**
+ * True while an automatic condenser call is not warranted after the last one
+ * failed, changed nothing, or shrank the pool by less than
+ * CONDENSE_MIN_PROGRESS_TOKENS: fewer than `max(500, (reflectionsPoolMaxTokens
+ * - reflectionsPoolTargetTokens) / 2)` reflection tokens were recorded on this
+ * branch since. Without it, a pool the model declines to condense would be
+ * sent again on every pass. A `/clear` or `/tree` move lifts it.
+ */
+export function isCondenseGated(
+	entries: readonly LedgerEntry[],
+	fold: FoldedLedger,
+	runtime: SessionRuntime,
+): boolean {
+	const gate = runtime.condenseGate;
+	if (!gate || !appliesToBranch(entries, gate)) return false;
+	const { reflectionsPoolMaxTokens, reflectionsPoolTargetTokens } = runtime.config;
+	const threshold = Math.max(500, Math.floor((reflectionsPoolMaxTokens - reflectionsPoolTargetTokens) / 2));
+	return recordedReflectionTokens(fold) - gate.recordedTokens < threshold;
+}
+
+/**
+ * The condenser runs when the active reflection pool exceeds
+ * `reflectionsPoolMaxTokens` and is not gated; a forced pass (`observe-now`)
+ * runs it whenever the pool exceeds `reflectionsPoolTargetTokens`.
+ */
+function isCondenseDue(entries: readonly LedgerEntry[], fold: FoldedLedger, runtime: SessionRuntime, force: boolean): boolean {
+	if (fold.reflections.length === 0) return false;
+	const poolTokens = reflectionTokens(fold.reflections);
+	if (force) return poolTokens > runtime.config.reflectionsPoolTargetTokens;
+	return poolTokens > runtime.config.reflectionsPoolMaxTokens && !isCondenseGated(entries, fold, runtime);
 }
 
 /** A dropper call that was due on this branch did not complete. */
@@ -299,6 +348,14 @@ async function appendReflections(
 	return reflections.length;
 }
 
+async function appendCondensed(runtime: SessionRuntime, outcome: CondenseResult, coversUpToId: string): Promise<number> {
+	const data = buildReflectionsCondensedData(outcome.reflections, outcome.retiredReflectionIds, coversUpToId);
+	if (!data) return 0;
+	if (!runtime.append(OM_REFLECTIONS_CONDENSED, data)) throw new Error("failed to append condense record");
+	runtime.lastCondenserAt = Date.now();
+	return data.retiredReflectionIds.length;
+}
+
 async function appendDrops(runtime: SessionRuntime, ids: string[], coversUpToId: string): Promise<number> {
 	const data = buildObservationsDroppedData(ids, coversUpToId);
 	if (!data) return 0;
@@ -309,7 +366,8 @@ async function appendDrops(runtime: SessionRuntime, ids: string[], coversUpToId:
 
 /**
  * One consolidation pass: observe the oldest unobserved chunk, reflect when the
- * active pool justifies it, then drop when the pool is still over budget.
+ * active pool justifies it, condense the reflection pool when it is over
+ * budget, then drop observations when their pool is still over budget.
  * The dropper runs after any reflection pass that ran without throwing, even
  * one that produced no reflections: otherwise an over-budget pool of
  * low/medium records nothing can be reflected about would grow without bound.
@@ -329,7 +387,7 @@ export async function consolidate(
 	reason: string,
 	options: { force?: boolean; complete?: typeof completeSimple } = {},
 ): Promise<ConsolidationResult> {
-	const result: ConsolidationResult = { observed: 0, reflected: 0, dropped: 0 };
+	const result: ConsolidationResult = { observed: 0, reflected: 0, condensed: 0, dropped: 0 };
 	if (!runtime.config.enabled || runtime.disposed) {
 		return { ...result, skipped: "disabled" };
 	}
@@ -357,13 +415,14 @@ export async function consolidate(
 		options.force ||
 		(activeTokens > runtime.config.observationsPoolMaxTokens &&
 			(!reflectionGated || isDropPending(entries, runtime)));
-	if (!observeDue && !reflectDue && !dropDue) {
+	const condenseDue = isCondenseDue(entries, fold, runtime, options.force === true);
+	if (!observeDue && !reflectDue && !condenseDue && !dropDue) {
 		return { ...result, skipped: "below_threshold" };
 	}
 
 	const startedAt = Date.now();
 	const errorBeforePass = runtime.lastError;
-	const pass = { started: false, coverageAdvanced: false };
+	const pass = { started: false, coverageAdvanced: false, condenseProgressed: false };
 	const ran = await runtime.runExclusive("consolidation", async (signal) => {
 		pass.started = true;
 		runtime.lastTriggerReason = reason;
@@ -446,6 +505,55 @@ export async function consolidate(
 			runtime.reflectionGate = { recordedTokens, tipId: branchTipId(entries), resetId: recordedResetId };
 		}
 
+		// The condenser can hold the lock for minutes; an observer backlog goes
+		// first (a follow-up pass keeps draining it), so compaction never waits
+		// on reflection housekeeping.
+		const observerBacklog = !options.force && shouldObserve(entries, runtime);
+		if (observerBacklog && isCondenseDue(entries, currentFold, runtime, false)) {
+			runtime.debug.record("condenser", "deferred_for_observer", {});
+		}
+		if (!observerBacklog && isCondenseDue(entries, currentFold, runtime, options.force === true)) {
+			if (!options.force) {
+				runtime.beforePass?.();
+				signal.throwIfAborted();
+			}
+			const poolBefore = reflectionTokens(currentFold.reflections);
+			try {
+				const outcome = await runCondenser({
+					runtime,
+					resolved: resolved.value,
+					reflections: currentFold.reflections,
+					observations: currentFold.observations,
+					targetTokens: runtime.config.reflectionsPoolTargetTokens,
+					reflectionsById: currentFold.reflectionsById,
+					signal,
+					complete: options.complete,
+				});
+				if (outcome) {
+					signal.throwIfAborted();
+					const covers = latestCoverageId(entries, OM_OBSERVATIONS_RECORDED) ?? entries[entries.length - 1]?.id;
+					if (covers) result.condensed = await appendCondensed(runtime, outcome, covers);
+					entries = branchEntries(runtime);
+					currentFold = foldLedger(entries);
+				}
+			} catch (error) {
+				// An abort leaves no gate, so the next pass tries again.
+				if (signal.aborted) throw error;
+				// A failed condenser call must not fail the observer and
+				// reflector work of this pass or back off later passes.
+				runtime.recordError("condenser", error);
+			}
+			// One batch per pass: a run that made real progress leaves the
+			// rest of an over-budget pool to the next pass (or a follow-up).
+			// A failed, declined or negligible run waits for new reflections;
+			// measured after the append, so the run's own replacements do not
+			// reopen the gate.
+			pass.condenseProgressed = poolBefore - reflectionTokens(currentFold.reflections) >= CONDENSE_MIN_PROGRESS_TOKENS;
+			runtime.condenseGate = pass.condenseProgressed
+				? undefined
+				: { recordedTokens: recordedReflectionTokens(currentFold), ...branchFingerprint(entries) };
+		}
+
 		const afterReflectTokens = observationTokens(currentFold.activeObservations);
 		// Retry a dropper call that was due but aborted or failed, without
 		// re-running the reflector over an unchanged pool.
@@ -510,29 +618,31 @@ export async function consolidate(
 	}
 	runtime.busyRetries = 0;
 	runtime.debug.record("consolidation", "complete", { ...result, reason, durationMs: Date.now() - startedAt });
-	scheduleFollowUp(runtime, reason, pass.coverageAdvanced, options.complete);
+	scheduleFollowUp(runtime, reason, pass.coverageAdvanced || pass.condenseProgressed, options.complete);
 	return result;
 }
 
 const pendingByRuntime = new WeakMap<SessionRuntime, Timer>();
 
 /**
- * Keep draining an observer backlog: one pass observes one chunk, so schedule
- * another pass while the observer is still due. Only a pass that advanced
- * coverage earns a follow-up (a failing model cannot spin), the chain is
- * capped per lifecycle trigger, and an already queued trigger wins.
+ * Keep draining an observer backlog or an over-budget reflection pool: one
+ * pass observes one chunk and condenses one batch, so schedule another pass
+ * while either is still due. Only a pass that advanced coverage or shrank the
+ * reflection pool earns a follow-up (a failing model cannot spin), the chain
+ * is capped per lifecycle trigger, and an already queued trigger wins.
  */
 function scheduleFollowUp(
 	runtime: SessionRuntime,
 	reason: string,
-	coverageAdvanced: boolean,
+	progressed: boolean,
 	complete: typeof completeSimple | undefined,
 ): void {
 	if (reason !== FOLLOWUP_REASON) runtime.followUpPasses = 0;
-	if (!coverageAdvanced || runtime.followUpPasses >= MAX_FOLLOWUP_PASSES) return;
+	if (!progressed || runtime.followUpPasses >= MAX_FOLLOWUP_PASSES) return;
 	if (pendingByRuntime.has(runtime)) return;
 	try {
-		if (!shouldObserve(branchEntries(runtime), runtime)) return;
+		const entries = branchEntries(runtime);
+		if (!shouldObserve(entries, runtime) && !isCondenseDue(entries, foldLedger(entries), runtime, false)) return;
 	} catch (error) {
 		runtime.recordError("consolidation.followup", error);
 		return;

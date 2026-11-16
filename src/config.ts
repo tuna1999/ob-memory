@@ -118,6 +118,7 @@ const BOOLEAN_KEYS = [
 	"debugLog",
 	"showNotifications",
 	"pauseOnHostSecrets",
+	"condenserCheck",
 ] as const;
 
 const POSITIVE_INT_KEYS = [
@@ -126,6 +127,8 @@ const POSITIVE_INT_KEYS = [
 	"observerChunkMaxTokens",
 	"observationsPoolMaxTokens",
 	"observationsPoolTargetTokens",
+	"reflectionsPoolMaxTokens",
+	"reflectionsPoolTargetTokens",
 	"workerMemoryMaxTokens",
 	"agentMaxTurns",
 	"agentMaxTokens",
@@ -164,6 +167,14 @@ function clampPoolTarget(config: ObMemoryConfig, origins: KeyOrigins, warnings: 
 	config.observationsPoolTargetTokens = config.observationsPoolMaxTokens;
 }
 
+function clampReflectionPoolTarget(config: ObMemoryConfig, origins: KeyOrigins, warnings: string[]): void {
+	if (config.reflectionsPoolTargetTokens <= config.reflectionsPoolMaxTokens) return;
+	warnings.push(
+		`${attribution(origins, "reflectionsPoolTargetTokens", "reflectionsPoolMaxTokens")}: reflectionsPoolTargetTokens (${config.reflectionsPoolTargetTokens}) exceeds reflectionsPoolMaxTokens (${config.reflectionsPoolMaxTokens}); target clamped`,
+	);
+	config.reflectionsPoolTargetTokens = config.reflectionsPoolMaxTokens;
+}
+
 function validateReflectionThreshold(config: ObMemoryConfig, origins: KeyOrigins, warnings: string[]): void {
 	if (config.reflectAfterTokens <= config.observationsPoolMaxTokens) return;
 	warnings.push(
@@ -196,6 +207,7 @@ function clampResourceLimits(config: ObMemoryConfig, origins: KeyOrigins, warnin
 function finalizeConfig(config: ObMemoryConfig, origins: KeyOrigins, warnings: string[]): ObMemoryConfig {
 	const finalized: ObMemoryConfig = { ...config };
 	clampPoolTarget(finalized, origins, warnings);
+	clampReflectionPoolTarget(finalized, origins, warnings);
 	validateReflectionThreshold(finalized, origins, warnings);
 	clampResourceLimits(finalized, origins, warnings);
 	return finalized;
@@ -271,6 +283,8 @@ const ENV_KEYS: ReadonlyArray<readonly [keyof ObMemoryConfig, string]> = [
 	["observerChunkMaxTokens", "OBSERVER_CHUNK_MAX_TOKENS"],
 	["observationsPoolMaxTokens", "OBSERVATIONS_POOL_MAX_TOKENS"],
 	["observationsPoolTargetTokens", "OBSERVATIONS_POOL_TARGET_TOKENS"],
+	["reflectionsPoolMaxTokens", "REFLECTIONS_POOL_MAX_TOKENS"],
+	["reflectionsPoolTargetTokens", "REFLECTIONS_POOL_TARGET_TOKENS"],
 	["compactionSummaryMaxTokens", "COMPACTION_SUMMARY_MAX_TOKENS"],
 	["compactionMaxRetainedTokens", "COMPACTION_MAX_RETAINED_TOKENS"],
 	["compactionCatchUpMaxChunks", "COMPACTION_CATCH_UP_MAX_CHUNKS"],
@@ -287,6 +301,7 @@ const ENV_KEYS: ReadonlyArray<readonly [keyof ObMemoryConfig, string]> = [
 	["debugLog", "DEBUG_LOG"],
 	["showNotifications", "SHOW_NOTIFICATIONS"],
 	["pauseOnHostSecrets", "PAUSE_ON_HOST_SECRETS"],
+	["condenserCheck", "CONDENSER_CHECK"],
 ];
 
 function applyEnv(

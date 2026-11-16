@@ -62,6 +62,7 @@ export class SessionRuntime {
 	lastObserverAt = 0;
 	lastReflectorAt = 0;
 	lastDropperAt = 0;
+	lastCondenserAt = 0;
 	lastTriggerReason: string | undefined;
 	/** Spaces observer retries after a run that accepted nothing. */
 	emptyBackoff: ({ coverageId: string | undefined; tokensAtEmpty: number } & BranchFingerprint) | undefined;
@@ -88,13 +89,20 @@ export class SessionRuntime {
 	 * DROPPER_MAX_FAILURES only the next reflector pass re-arms the dropper.
 	 */
 	dropPending: (BranchFingerprint & { failures: number }) | undefined;
+	/**
+	 * Set after every condenser call that completed or failed (not aborted):
+	 * further automatic condenser calls wait until enough new reflection
+	 * tokens are recorded on this branch. `recordedTokens` counts every
+	 * reflection recorded, retired or not, so a run cannot reopen its own gate.
+	 */
+	condenseGate: ({ recordedTokens: number } & BranchFingerprint) | undefined;
 	/** Follow-up passes scheduled since the last lifecycle-triggered pass. */
 	followUpPasses = 0;
 	/** Retries scheduled for triggers that found the lock busy. */
 	busyRetries = 0;
 	/**
 	 * Runs before every automatic consolidation pass, before each of its
-	 * observer, reflector and dropper stages, and before each compaction
+	 * observer, reflector, condenser and dropper stages, and before each compaction
 	 * catch-up chunk. omp sends extensions no event when Hide
 	 * Secrets is switched on, so index.ts installs its guard here; the guard
 	 * can make the session passive and abort the running pass.

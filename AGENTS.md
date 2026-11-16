@@ -7,7 +7,7 @@
 ## Architecture & Data Flow
 
 - **Registration**: `src/index.ts` `obMemory(pi)` (a wrapper over `createObMemory({ agentDir, env })`, which tests use to inject config sources) registers the `/ob-memory` command, the `ob_recall` tool, `session.compacting`, and lifecycle events. `session_before_compact` is registered lazily, only once a bound session can own compaction (omp disables async compaction while any extension handles it), and never unregistered. The single `SessionRuntime` lives in the factory closure; non-`main` agents are ignored. A Hide Secrets guard (`runtime.beforePass` before each pass, stage, worker turn and catch-up chunk; lifecycle events, commands, compaction) pauses automatic passes while omp's secret obfuscation is on (`pauseOnHostSecrets`).
-- **Write path**: `session_start` → `bindSession` builds the runtime → `turn_end` / `agent_end` call `scheduleConsolidation` (debounced via a module `WeakMap`) → `workers/trigger.ts` `consolidate()` resolves the worker model, chunks unobserved entries (`ledger/serialize.ts`), then runs observer → reflector → dropper. Each stage appends custom entries through `pi.appendEntry` (`ob-memory.observations.recorded`, `…reflections.recorded`, `…observations.dropped`). Observation timestamps are model-supplied and pattern-validated; ids and token counts are computed locally.
+- **Write path**: `session_start` → `bindSession` builds the runtime → `turn_end` / `agent_end` call `scheduleConsolidation` (debounced via a module `WeakMap`) → `workers/trigger.ts` `consolidate()` resolves the worker model, chunks unobserved entries (`ledger/serialize.ts`), then runs observer → reflector → condenser → dropper. Each stage appends custom entries through `pi.appendEntry` (`ob-memory.observations.recorded`, `…reflections.recorded`, `…reflections.condensed`, `…observations.dropped`). Observation timestamps are model-supplied and pattern-validated; ids and token counts are computed locally.
 - **Read path**: `ledger/fold.ts` (`foldLedger`, `fullProjection`, `visibleProjection`, `compactionProjection`) rebuilds state from entries; `ledger/render.ts` renders within a token budget; `commands/view.ts` and `commands/status.ts` present it.
 - **Compaction**: `session_before_compact` may own the summary by returning a custom `CompactionResult` (`hooks/compaction.ts`); otherwise `session.compacting` supplies rendered memory to native summarization where the method consumes it. `hooks/cut.ts` resolves a safe cut; unobserved source is retained when it fits, otherwise compaction delegates.
 - **Branch locality**: every pass re-reads `ctx.sessionManager.getBranch()`; the runtime is rebuilt on session-id changes (switch/branch/fork). Same-session tree navigation keeps the runtime and only refreshes context, so no ledger state is cached across paths.
@@ -18,8 +18,8 @@ Patterns to preserve:
 - `signal.throwIfAborted()` before any append; `append` returns `false` once disposed.
 - Compaction catch-up preempts a busy background pass via `runtime.preempt()` (bounded wait); never run a second worker pass concurrently.
 - Coverage watermarks may not exceed the last sent source entry; partial coverage advances only through cited ids. Coverage-only markers (empty `observations`, `coverageReason` `empty` | `retry_limit`) are the only exception; compaction treats a live `retry_limit` span as unobserved.
-- Memory from before the latest `/clear` (`reset_boundary`) never reaches a model again; runtime gates (`reflectionGate`, `emptyBackoff`, `observerRetry`, `dropPending`) record a `BranchFingerprint` (branch tip and latest `/clear` boundary) and lapse once that tip is no longer on the branch (`/tree` to another path) or a different boundary is the latest; new turns past the recorded tip do not lift them (`appliesToBranch` in `src/workers/trigger.ts`).
-- Drops are tombstones applied at the tip, never deletions of history.
+- Memory from before the latest `/clear` (`reset_boundary`) never reaches a model again; runtime gates (`reflectionGate`, `condenseGate`, `emptyBackoff`, `observerRetry`, `dropPending`) record a `BranchFingerprint` (branch tip and latest `/clear` boundary) and lapse once that tip is no longer on the branch (`/tree` to another path) or a different boundary is the latest; new turns past the recorded tip do not lift them (`appliesToBranch` in `src/workers/trigger.ts`).
+- Drops and reflection retirements are tombstones applied at the tip, never deletions of history. A condense record carries its replacement reflections and its retirements together, so a fold applies both or neither.
 - Redaction (`security/redact.ts`) wraps worker input, rendered output, notifications, logs, and recall.
 
 ## Key Directories
@@ -29,7 +29,7 @@ Patterns to preserve:
 | `src/commands/` | `/ob-memory` subcommands (`control.ts`) and presentation (`view.ts`, `status.ts`); argument completions in `completions.ts` |
 | `src/hooks/` | Compaction ownership, cut resolution, policy, fallback injection |
 |`src/ledger/`|Entry types/guards, fold/projections, provider usage deltas, renderer, serialization/chunking, recall, quality filter|
-| `src/workers/` | Observer/reflector/dropper, worker loop, prompt text, model resolution, consolidation trigger |
+| `src/workers/` | Observer/reflector/condenser/dropper, worker loop, prompt text, model resolution, consolidation trigger |
 | `src/tools/` | `ob_recall` tool registration |
 | `src/security/` | Secret redaction |
 | `src/util/` | Id hashing, token estimation, time helpers |
@@ -85,7 +85,7 @@ There is no compile/bundle step, no lint/format config, and no CI: verification 
 
 ## Testing & QA
 
-- Framework: `bun:test` only; 30 files, about 480 tests. No coverage collector or thresholds.
+- Framework: `bun:test` only; 32 files, about 520 tests. No coverage collector or thresholds.
 - Harness: `makeHarness()` fakes `pi`/`ctx`, `scriptedComplete()` replays canned assistant messages, and `makeModel()` uses `https://example.invalid/v1` — tests never hit the network or a real model.
 - Style: behavioral assertions on returned values and appended ledger entries (no `mock.module`, `spyOn`, or fake timers); frozen timestamps (`2026-10-29T10:00:00Z`); temp dirs via `mkdtempSync` and `rmSync` in `afterEach`; env vars passed explicitly (no test mutates `process.env`; extension tests use `createObMemory({ agentDir, env })`). Lifecycle tests drive recorded fake host timers by hand; scheduling tests use real short timers.
 - Expectation: changes to ledger, workers, compaction, or config need a regression test in the closest suite; keep tests deterministic and offline.
