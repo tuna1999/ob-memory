@@ -804,7 +804,7 @@ export async function runCondenser(options: RunCondenserOptions): Promise<Conden
 						`${label}: changes what the reflections behind it say (${issues
 							.slice(0, 2)
 							.map((issue) => `"${issue.claim}": ${issue.problem}`)
-							.join("; ")}); fix the line from the reflections it replaces, or leave them as they are`,
+							.join("; ")}); fix the line from the reflections it replaces, give a separate subject its own merge, or leave them as they are`,
 					);
 					for (const id of candidate.sources) if (!inRejectedMerge.has(id)) inRejectedMerge.set(id, label);
 					return;

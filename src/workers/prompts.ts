@@ -94,7 +94,8 @@ Report only claims in a merged line that its sources do not support or that the 
 - two separate facts, findings, or requirements fused into one, or a condition or cause tied to the wrong fact;
 - an order, sequence, cause, or condition changed;
 - a plan, recommendation, next step, or open item stated as done, ran, shipped, or merged (or the reverse);
-- a number, version, count, or name changed or present in no source.
+- a number, version, count, or name changed or present in no source;
+- facts about a separate subject joined into the line: a different component, workflow, ticket, or environment fact that a reader would look up on its own (quote the clause that does not belong; a step, cause, or example of the line's own subject belongs to it).
 
 Do not report omissions, rewording that keeps the meaning, or a short summary of what a source states. When sources conflict, the later one wins.
 
