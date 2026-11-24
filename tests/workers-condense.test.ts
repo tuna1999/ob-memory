@@ -818,6 +818,15 @@ describe("condenser in a consolidation pass", () => {
 		expect(runtime.condenseGate).toBeDefined();
 	});
 
+	test("a call that answers after a halved batch returns to the full batch", async () => {
+		const { runtime } = overBudgetHarness();
+		runtime.condenserBatchTokens = CONDENSER_MIN_BATCH_TOKENS;
+		const content = "The schedule editor timezone field is the Base UI combobox.";
+		const { complete } = workers(() => condenseCall({ merges: [{ replaces: [R2.id, R4.id], content }], retire: [R3.id] }));
+		await consolidate(runtime, "turn_end", { complete });
+		expect(runtime.condenserBatchTokens).toBeUndefined();
+	});
+
 	test("a reply truncated before any proposal counts as an output-limit failure", async () => {
 		const { runtime } = makeHarness({ redactSecrets: false });
 		const error = await runCondenser({

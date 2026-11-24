@@ -28,7 +28,7 @@ import { chunkUnobservedEntries, estimateEntryTokens, type SourceChunk } from ".
 import { realTokensSinceObservationCoverage } from "../ledger/usage";
 import { resolveObserverChunkMaxTokens } from "../config";
 import type { BranchFingerprint, SessionRuntime } from "../runtime";
-import { isOutputLimitError, runCondenser, shrinkCondenserBatch, type CondenseResult } from "./condenser";
+import { CONDENSER_BATCH_MAX_TOKENS, isOutputLimitError, runCondenser, shrinkCondenserBatch, type CondenseResult } from "./condenser";
 import { runDropper, shrinkDropperBatch } from "./dropper";
 import { resolveWorkerModel, type ResolvedWorkerModel } from "./model";
 import { runObserver, type ObserverRunOutcome } from "./observer";
@@ -162,8 +162,9 @@ function recordedReflectionTokens(fold: FoldedLedger): number {
 }
 
 /**
- * A condenser run that shrinks the active pool by less than this is treated
- * like a declined one and gates further automatic runs.
+ * A condenser run that shrinks the active pool by less than this (or a fifth
+ * of a smaller batch) is treated like a declined one and gates further
+ * automatic runs.
  */
 export const CONDENSE_MIN_PROGRESS_TOKENS = 200;
 
@@ -518,6 +519,7 @@ export async function consolidate(
 				signal.throwIfAborted();
 			}
 			const poolBefore = reflectionTokens(currentFold.reflections);
+			const batchUsed = runtime.condenserBatchTokens ?? CONDENSER_BATCH_MAX_TOKENS;
 			let batchShrunk = false;
 			try {
 				const outcome = await runCondenser({
@@ -537,6 +539,9 @@ export async function consolidate(
 					entries = branchEntries(runtime);
 					currentFold = foldLedger(entries);
 				}
+				// A call that answered returns to the full batch: a halved batch
+				// cuts too little per pass to keep up with a growing pool.
+				runtime.condenserBatchTokens = undefined;
 			} catch (error) {
 				// An abort leaves no gate, so the next pass tries again.
 				if (signal.aborted) throw error;
@@ -552,7 +557,8 @@ export async function consolidate(
 			// A failed, declined or negligible run waits for new reflections;
 			// measured after the append, so the run's own replacements do not
 			// reopen the gate.
-			pass.condenseProgressed = poolBefore - reflectionTokens(currentFold.reflections) >= CONDENSE_MIN_PROGRESS_TOKENS;
+			const minProgress = Math.min(CONDENSE_MIN_PROGRESS_TOKENS, Math.floor(batchUsed / 5));
+			pass.condenseProgressed = poolBefore - reflectionTokens(currentFold.reflections) >= minProgress;
 			runtime.condenseGate = pass.condenseProgressed || batchShrunk
 				? undefined
 				: { recordedTokens: recordedReflectionTokens(currentFold), ...branchFingerprint(entries) };
@@ -593,6 +599,7 @@ export async function consolidate(
 					const covers = latestCoverageId(entries, OM_OBSERVATIONS_RECORDED) ?? entries[entries.length - 1]?.id;
 					if (covers) result.dropped = await appendDrops(runtime, ids, covers);
 				}
+				runtime.dropperBatchTokens = undefined;
 				// One batch per call: a run that dropped something leaves the rest of
 				// a still over-budget pool to the next pass (or a follow-up).
 				const remaining = observationTokens(foldLedger(branchEntries(runtime)).activeObservations);
