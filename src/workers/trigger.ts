@@ -28,7 +28,7 @@ import { chunkUnobservedEntries, estimateEntryTokens, type SourceChunk } from ".
 import { realTokensSinceObservationCoverage } from "../ledger/usage";
 import { resolveObserverChunkMaxTokens } from "../config";
 import type { BranchFingerprint, SessionRuntime } from "../runtime";
-import { runCondenser, type CondenseResult } from "./condenser";
+import { isOutputLimitError, runCondenser, shrinkCondenserBatch, type CondenseResult } from "./condenser";
 import { runDropper } from "./dropper";
 import { resolveWorkerModel, type ResolvedWorkerModel } from "./model";
 import { runObserver, type ObserverRunOutcome } from "./observer";
@@ -518,6 +518,7 @@ export async function consolidate(
 				signal.throwIfAborted();
 			}
 			const poolBefore = reflectionTokens(currentFold.reflections);
+			let batchShrunk = false;
 			try {
 				const outcome = await runCondenser({
 					runtime,
@@ -542,6 +543,9 @@ export async function consolidate(
 				// A failed condenser call must not fail the observer and
 				// reflector work of this pass or back off later passes.
 				runtime.recordError("condenser", error);
+				// A reply that ran out of output tokens retries with a smaller
+				// batch on the next pass instead of waiting for new reflections.
+				if (isOutputLimitError(error)) batchShrunk = shrinkCondenserBatch(runtime);
 			}
 			// One batch per pass: a run that made real progress leaves the
 			// rest of an over-budget pool to the next pass (or a follow-up).
@@ -549,7 +553,7 @@ export async function consolidate(
 			// measured after the append, so the run's own replacements do not
 			// reopen the gate.
 			pass.condenseProgressed = poolBefore - reflectionTokens(currentFold.reflections) >= CONDENSE_MIN_PROGRESS_TOKENS;
-			runtime.condenseGate = pass.condenseProgressed
+			runtime.condenseGate = pass.condenseProgressed || batchShrunk
 				? undefined
 				: { recordedTokens: recordedReflectionTokens(currentFold), ...branchFingerprint(entries) };
 		}

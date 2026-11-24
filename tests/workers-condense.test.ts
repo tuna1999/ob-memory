@@ -9,7 +9,9 @@ import {
 	CONDENSER_MAX_MERGED_CONDENSED_TOKENS,
 	CONDENSER_MAX_MERGED_TOKENS,
 	CONDENSER_MAX_TURNS,
+	CONDENSER_MIN_BATCH_TOKENS,
 	condenserRecentTokens,
+	isOutputLimitError,
 	namesMissingFromSources,
 	runCondenser,
 } from "../src/workers/condenser";
@@ -797,6 +799,37 @@ describe("condenser in a consolidation pass", () => {
 		await consolidate(runtime, "turn_end", { complete });
 		expect(stages).toEqual(["condenser"]);
 		expect(entries.some((entry) => entry.customType === CONDENSED)).toBe(false);
+	});
+
+	test("a reply cut off by the output limit halves the batch and retries on the next pass", async () => {
+		const { runtime } = overBudgetHarness();
+		const cutOff = makeAssistant([text("")], "error", "an empty reply: cut at its length, the whole output spent on reasoning (raise max_tokens)");
+		const { complete, stages } = workers(() => cutOff);
+		await consolidate(runtime, "turn_end", { complete });
+		expect(runtime.lastError?.stage).toBe("condenser");
+		expect(runtime.condenserBatchTokens).toBe(CONDENSER_BATCH_MAX_TOKENS / 2);
+		expect(runtime.condenseGate).toBeUndefined();
+		await consolidate(runtime, "turn_end", { complete });
+		expect(stages).toEqual(["condenser", "condenser"]);
+		runtime.condenserBatchTokens = CONDENSER_MIN_BATCH_TOKENS;
+		await consolidate(runtime, "turn_end", { complete });
+		// At the smallest batch a cut-off reply waits for new reflections like any failure.
+		expect(runtime.condenserBatchTokens).toBe(CONDENSER_MIN_BATCH_TOKENS);
+		expect(runtime.condenseGate).toBeDefined();
+	});
+
+	test("a reply truncated before any proposal counts as an output-limit failure", async () => {
+		const { runtime } = makeHarness({ redactSecrets: false });
+		const error = await runCondenser({
+			runtime,
+			resolved,
+			reflections: POOL,
+			observations: OBSERVATIONS,
+			targetTokens: 1,
+			signal: new AbortController().signal,
+			complete: scriptedComplete([makeAssistant([text("")], "length")]),
+		}).catch((caught: unknown) => caught);
+		expect(isOutputLimitError(error)).toBe(true);
 	});
 
 	test("a run that clearly shrinks a still over-budget pool leaves no wait and schedules a follow-up", async () => {

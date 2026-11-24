@@ -90,8 +90,32 @@ const CHECK_SCHEMA: TJsonSchema = {
  * over several short passes instead of one long one: a pass holds the
  * consolidation lock, a new agent run aborts it (discarding everything it
  * accepted), and a smaller batch keeps each decision within one or two turns.
+ * Reasoning models think longer about a larger batch: at `reasoning_effort:
+ * low` a 3,000-token batch spent all of an 8,192-token output budget on
+ * reasoning in most calls and answered nothing.
  */
-export const CONDENSER_BATCH_MAX_TOKENS = 3_000;
+export const CONDENSER_BATCH_MAX_TOKENS = 1_000;
+/** Smallest batch an output-limit failure shrinks the batch to. */
+export const CONDENSER_MIN_BATCH_TOKENS = 250;
+/** A worker reply cut off by its output token limit before it said anything usable. */
+const OUTPUT_LIMIT_ERROR = /output token limit|max_tokens|\bcut at its length\b/i;
+
+/** Whether `error` is a condenser reply that ran out of output tokens (usually spent on reasoning). */
+export function isOutputLimitError(error: unknown): boolean {
+	return OUTPUT_LIMIT_ERROR.test(error instanceof Error ? error.message : String(error));
+}
+
+/**
+ * Halve the session's condenser batch after an output-limit failure, so the
+ * next call asks for less. Returns false once the batch is at its minimum.
+ */
+export function shrinkCondenserBatch(runtime: SessionRuntime): boolean {
+	const current = runtime.condenserBatchTokens ?? CONDENSER_BATCH_MAX_TOKENS;
+	if (current <= CONDENSER_MIN_BATCH_TOKENS) return false;
+	runtime.condenserBatchTokens = Math.max(CONDENSER_MIN_BATCH_TOKENS, Math.floor(current / 2));
+	runtime.debug.record("condenser", "batch_shrunk", { from: current, to: runtime.condenserBatchTokens });
+	return true;
+}
 /** A merged line must be at most this share of what it replaces. */
 export const CONDENSER_MAX_MERGED_SHARE = 0.9;
 /**
@@ -581,7 +605,7 @@ export async function runCondenser(options: RunCondenserOptions): Promise<Conden
 
 	const protectedIds = protectedReflectionIds(reflections, observations);
 	const memoryTokens = resolveWorkerMemoryMaxTokens(runtime.config, resolved.model.contextWindow);
-	const batchTokens = Math.min(CONDENSER_BATCH_MAX_TOKENS, memoryTokens);
+	const batchTokens = Math.min(runtime.condenserBatchTokens ?? CONDENSER_BATCH_MAX_TOKENS, memoryTokens);
 	const context = boundedPool(reflections, protectedIds, {
 		maxTokens: batchTokens,
 		contextTokens: Math.min(CONDENSER_CONTEXT_MAX_TOKENS, memoryTokens - batchTokens),
@@ -866,6 +890,9 @@ Hard maximum retirements this run: ${metrics.maxRetiresAllowed}. Merges are not 
 	});
 	if (result.failed) {
 		runtime.debug.record("condenser", "partial_after_error", { turns: result.turns, error: result.errorMessage });
+	}
+	if (result.truncated && used.size === 0) {
+		throw new Error("condenser reply hit its output token limit before proposing any change");
 	}
 	if (checkedMerges > 0) runtime.debug.record("condenser", "checked", { merges: checkedMerges, rejected: checkRejected });
 	if (used.size === 0) {

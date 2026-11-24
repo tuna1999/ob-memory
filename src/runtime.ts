@@ -96,6 +96,11 @@ export class SessionRuntime {
 	 * reflection recorded, retired or not, so a run cannot reopen its own gate.
 	 */
 	condenseGate: ({ recordedTokens: number } & BranchFingerprint) | undefined;
+	/**
+	 * Condenser batch for this session after an output-limit failure halved
+	 * it; undefined uses the default batch.
+	 */
+	condenserBatchTokens: number | undefined;
 	/** Follow-up passes scheduled since the last lifecycle-triggered pass. */
 	followUpPasses = 0;
 	/** Retries scheduled for triggers that found the lock busy. */
