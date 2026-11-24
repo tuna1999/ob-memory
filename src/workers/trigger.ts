@@ -28,7 +28,7 @@ import { chunkUnobservedEntries, estimateEntryTokens, type SourceChunk } from ".
 import { realTokensSinceObservationCoverage } from "../ledger/usage";
 import { resolveObserverChunkMaxTokens } from "../config";
 import type { BranchFingerprint, SessionRuntime } from "../runtime";
-import { CONDENSER_BATCH_MAX_TOKENS, isOutputLimitError, runCondenser, shrinkCondenserBatch, type CondenseResult } from "./condenser";
+import { isOutputLimitError, runCondenser, shrinkCondenserBatch, type CondenseResult } from "./condenser";
 import { runDropper, shrinkDropperBatch } from "./dropper";
 import { resolveWorkerModel, type ResolvedWorkerModel } from "./model";
 import { runObserver, type ObserverRunOutcome } from "./observer";
@@ -162,11 +162,12 @@ function recordedReflectionTokens(fold: FoldedLedger): number {
 }
 
 /**
- * A condenser run that shrinks the active pool by less than this (or a fifth
- * of a smaller batch) is treated like a declined one and gates further
- * automatic runs.
+ * A condenser run that shrinks the active pool by less than this is treated
+ * like a declined one and gates further automatic runs. A 1,000-token batch
+ * often cuts only 100–300 tokens, so the threshold stays low and follow-up
+ * passes keep a growing pool in check.
  */
-export const CONDENSE_MIN_PROGRESS_TOKENS = 200;
+export const CONDENSE_MIN_PROGRESS_TOKENS = 50;
 
 /**
  * True while an automatic condenser call is not warranted after the last one
@@ -519,7 +520,6 @@ export async function consolidate(
 				signal.throwIfAborted();
 			}
 			const poolBefore = reflectionTokens(currentFold.reflections);
-			const batchUsed = runtime.condenserBatchTokens ?? CONDENSER_BATCH_MAX_TOKENS;
 			let batchShrunk = false;
 			try {
 				const outcome = await runCondenser({
@@ -557,8 +557,7 @@ export async function consolidate(
 			// A failed, declined or negligible run waits for new reflections;
 			// measured after the append, so the run's own replacements do not
 			// reopen the gate.
-			const minProgress = Math.min(CONDENSE_MIN_PROGRESS_TOKENS, Math.floor(batchUsed / 5));
-			pass.condenseProgressed = poolBefore - reflectionTokens(currentFold.reflections) >= minProgress;
+			pass.condenseProgressed = poolBefore - reflectionTokens(currentFold.reflections) >= CONDENSE_MIN_PROGRESS_TOKENS;
 			runtime.condenseGate = pass.condenseProgressed || batchShrunk
 				? undefined
 				: { recordedTokens: recordedReflectionTokens(currentFold), ...branchFingerprint(entries) };
