@@ -29,7 +29,7 @@ import { realTokensSinceObservationCoverage } from "../ledger/usage";
 import { resolveObserverChunkMaxTokens } from "../config";
 import type { BranchFingerprint, SessionRuntime } from "../runtime";
 import { isOutputLimitError, runCondenser, shrinkCondenserBatch, type CondenseResult } from "./condenser";
-import { runDropper } from "./dropper";
+import { runDropper, shrinkDropperBatch } from "./dropper";
 import { resolveWorkerModel, type ResolvedWorkerModel } from "./model";
 import { runObserver, type ObserverRunOutcome } from "./observer";
 import { runReflector } from "./reflector";
@@ -422,7 +422,7 @@ export async function consolidate(
 
 	const startedAt = Date.now();
 	const errorBeforePass = runtime.lastError;
-	const pass = { started: false, coverageAdvanced: false, condenseProgressed: false };
+	const pass = { started: false, coverageAdvanced: false, condenseProgressed: false, dropProgressed: false };
 	const ran = await runtime.runExclusive("consolidation", async (signal) => {
 		pass.started = true;
 		runtime.lastTriggerReason = reason;
@@ -593,14 +593,22 @@ export async function consolidate(
 					const covers = latestCoverageId(entries, OM_OBSERVATIONS_RECORDED) ?? entries[entries.length - 1]?.id;
 					if (covers) result.dropped = await appendDrops(runtime, ids, covers);
 				}
-				runtime.dropPending = undefined;
+				// One batch per call: a run that dropped something leaves the rest of
+				// a still over-budget pool to the next pass (or a follow-up).
+				const remaining = observationTokens(foldLedger(branchEntries(runtime)).activeObservations);
+				pass.dropProgressed = result.dropped > 0 && remaining > runtime.config.observationsPoolMaxTokens;
+				runtime.dropPending = pass.dropProgressed ? { ...branchFingerprint(branchEntries(runtime)), failures: 0 } : undefined;
 			} catch (error) {
 				// An abort is not a failure: the retry and its count are kept.
 				if (signal.aborted) throw error;
-				const failed = failures + 1;
+				// A reply that ran out of output tokens retries with fewer
+				// candidates on the next pass: it neither counts toward the
+				// failure limit nor fails this pass.
+				const shrunk = isOutputLimitError(error) && shrinkDropperBatch(runtime);
+				const failed = shrunk ? failures : failures + 1;
 				runtime.dropPending = failed < DROPPER_MAX_FAILURES ? { ...fingerprint, failures: failed } : undefined;
 				// The call right after a reflector pass still fails the pass.
-				if (!dropRetry) throw error;
+				if (!dropRetry && !shrunk) throw error;
 				// A failed retry must not turn this pass's observer work into a
 				// failure, which would back off every later pass.
 				runtime.recordError("dropper.retry", error);
@@ -622,7 +630,7 @@ export async function consolidate(
 	}
 	runtime.busyRetries = 0;
 	runtime.debug.record("consolidation", "complete", { ...result, reason, durationMs: Date.now() - startedAt });
-	scheduleFollowUp(runtime, reason, pass.coverageAdvanced || pass.condenseProgressed, options.complete);
+	scheduleFollowUp(runtime, reason, pass.coverageAdvanced || pass.condenseProgressed || pass.dropProgressed, options.complete);
 	return result;
 }
 

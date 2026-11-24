@@ -9,6 +9,10 @@
 - A run is one `ob-memory.reflections.condensed` entry: replacements and retirements apply together, at the tip, like observation drops. Retired reflections stay in the session file; `ob_recall` reports them as retired and names the reflection they were merged into, and shows `condensed from` for a merged one. Older versions ignore the entry.
 - One condenser call handles one batch of at most 1,000 reflection tokens in at most 4 model turns (a 3,000-token batch made reasoning models spend an 8,192-token output limit on reasoning and answer nothing in most calls; a reply cut off by the output limit halves the session's batch, down to 250 tokens, and retries on the next pass), and a pass skips it while the observer still has a backlog, so a large pool shrinks over several short passes (with idle follow-ups) instead of one long call that a new agent run would abort. A call that failed, changed nothing, or shrank the pool by less than 200 tokens makes automatic calls wait for new reflections; a failure is recorded without failing the pass. `/ob-memory status` shows active and retired reflections, the reflection pool against its budget, and the last condenser run; `/ob-memory observe-now` reports condensed reflections.
 
+### Dropper
+
+- The dropper listed the whole observation pool (up to `workerMemoryMaxTokens`), so reasoning models often spent their output limit on reasoning and answered nothing, and the oldest observations it listed first were mostly ones it may not drop. In a real session the pool reached 58k tokens against a 16k budget. A call now lists at most 3,000 tokens of candidates that it may drop (no critical observations, no high observations without reflection coverage); on the same pool a call dropped 24–26 observations in under a minute instead of 0–5 in two. A productive call on a pool still over budget keeps the dropper pending for the next pass; a reply cut off by its output limit halves the batch and neither fails the pass nor counts toward the retry limit.
+
 ## 0.4.1
 
 ### Commands

@@ -90,6 +90,11 @@ export class SessionRuntime {
 	 */
 	dropPending: (BranchFingerprint & { failures: number }) | undefined;
 	/**
+	 * Dropper batch for this session after an output-limit failure halved
+	 * it; undefined uses the default batch.
+	 */
+	dropperBatchTokens: number | undefined;
+	/**
 	 * Set after every condenser call that completed or failed (not aborted):
 	 * further automatic condenser calls wait until enough new reflection
 	 * tokens are recorded on this branch. `recordedTokens` counts every

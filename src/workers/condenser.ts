@@ -7,6 +7,7 @@ import type { SessionRuntime } from "../runtime";
 import { redactText } from "../security/redact";
 import { hashMemoryId, normalizeRecordContentStrict } from "../util/ids";
 import { formatRejections, runWorkerLoop, type WorkerToolResult } from "./loop";
+export { isOutputLimitError } from "./loop";
 import type { ResolvedWorkerModel } from "./model";
 import { CONDENSER_SYSTEM, MERGE_CHECKER_SYSTEM } from "./prompts";
 
@@ -97,14 +98,6 @@ const CHECK_SCHEMA: TJsonSchema = {
 export const CONDENSER_BATCH_MAX_TOKENS = 1_000;
 /** Smallest batch an output-limit failure shrinks the batch to. */
 export const CONDENSER_MIN_BATCH_TOKENS = 250;
-/** A worker reply cut off by its output token limit before it said anything usable. */
-const OUTPUT_LIMIT_ERROR = /output token limit|max_tokens|\bcut at its length\b/i;
-
-/** Whether `error` is a condenser reply that ran out of output tokens (usually spent on reasoning). */
-export function isOutputLimitError(error: unknown): boolean {
-	return OUTPUT_LIMIT_ERROR.test(error instanceof Error ? error.message : String(error));
-}
-
 /**
  * Halve the session's condenser batch after an output-limit failure, so the
  * next call asks for less. Returns false once the batch is at its minimum.

@@ -79,6 +79,14 @@ export interface WorkerLoopResult {
 	errorMessage?: string;
 }
 
+/** A worker reply cut off by its output token limit before it said anything usable. */
+const OUTPUT_LIMIT_ERROR = /output token limit|max_tokens|\bcut at its length\b/i;
+
+/** Whether `error` is a worker reply that ran out of output tokens (usually spent on reasoning). */
+export function isOutputLimitError(error: unknown): boolean {
+	return OUTPUT_LIMIT_ERROR.test(error instanceof Error ? error.message : String(error));
+}
+
 const LENGTH_STOP_NOTE =
 	"This response hit the output token limit, so the call may be incomplete: send fewer, shorter items per call.";
 

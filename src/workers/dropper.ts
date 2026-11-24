@@ -8,6 +8,28 @@ import type { ResolvedWorkerModel } from "./model";
 import { DROPPER_SYSTEM } from "./prompts";
 import { resolveWorkerMemoryMaxTokens } from "../config";
 
+/**
+ * Observation tokens listed as drop candidates in one dropper request, oldest
+ * first. Reasoning models think longer about more candidates: with the whole
+ * pool listed (about 20,000 prompt tokens), most calls spent an 8,192-token
+ * output limit on reasoning and answered nothing.
+ */
+export const DROPPER_BATCH_MAX_TOKENS = 3_000;
+/** Smallest batch an output-limit failure shrinks the dropper batch to. */
+export const DROPPER_MIN_BATCH_TOKENS = 500;
+
+/**
+ * Halve the session's dropper batch after an output-limit failure, so the
+ * next call lists fewer candidates. Returns false once the batch is at its minimum.
+ */
+export function shrinkDropperBatch(runtime: SessionRuntime): boolean {
+	const current = runtime.dropperBatchTokens ?? DROPPER_BATCH_MAX_TOKENS;
+	if (current <= DROPPER_MIN_BATCH_TOKENS) return false;
+	runtime.dropperBatchTokens = Math.max(DROPPER_MIN_BATCH_TOKENS, Math.floor(current / 2));
+	runtime.debug.record("dropper", "batch_shrunk", { from: current, to: runtime.dropperBatchTokens });
+	return true;
+}
+
 const DROP_SCHEMA: TJsonSchema = {
 	type: "object",
 	additionalProperties: false,
@@ -98,16 +120,17 @@ function selectWithinBudget(lines: readonly string[], order: readonly number[], 
 
 /**
  * Keep the worker request inside `workerMemoryMaxTokens`. Oldest observations
- * are the primary drop candidates, so they are selected oldest-first, and they
- * keep at least WORKER_OBSERVATIONS_MIN_SHARE of the budget: reflections are
- * never pruned and would otherwise leave the dropper nothing to act on.
- * Reflections take the rest, newest first, and either side reclaims what the
- * other leaves unused. Omitted observations cannot be selected.
+ * are the primary drop candidates, so they are selected oldest-first, up to
+ * `batchTokens`, and they keep at least WORKER_OBSERVATIONS_MIN_SHARE of the
+ * budget: reflections are never pruned and would otherwise leave the dropper
+ * nothing to act on. Reflections take the rest, newest first, and either side
+ * reclaims what the other leaves unused. Omitted observations cannot be selected.
  */
 function boundedContext(
 	reflections: readonly Reflection[],
 	observations: readonly Observation[],
 	maxTokens: number,
+	batchTokens: number,
 ): BoundedDropperContext {
 	const reflectionLines = reflections.map(reflectionLine);
 	const observationLines = observations.map(
@@ -119,14 +142,23 @@ function boundedContext(
 	);
 	const oldestFirst = observationLines.map((_, index) => index);
 	const newestFirst = reflectionLines.map((_, index) => reflectionLines.length - 1 - index);
-	const reserved = selectWithinBudget(observationLines, oldestFirst, Math.floor(available * WORKER_OBSERVATIONS_MIN_SHARE));
+	const reserved = selectWithinBudget(
+		observationLines,
+		oldestFirst,
+		Math.min(batchTokens, Math.floor(available * WORKER_OBSERVATIONS_MIN_SHARE)),
+	);
 	const pickedReflections = selectWithinBudget(reflectionLines, newestFirst, available - reserved.tokens);
-	const pickedObservations = selectWithinBudget(observationLines, oldestFirst, available - pickedReflections.tokens);
+	const pickedObservations = selectWithinBudget(
+		observationLines,
+		oldestFirst,
+		Math.min(batchTokens, available - pickedReflections.tokens),
+	);
 	const selectedReflections = pickedReflections.indexes.map((index) => reflectionLines[index]!);
 	const selectedLines = pickedObservations.indexes.map((index) => observationLines[index]!);
 	const included = pickedObservations.indexes.map((index) => observations[index]!);
 	const omitted = observations.length - included.length;
-	const omittedNote = omitted > 0 ? `\n(${omitted} observation${omitted === 1 ? "" : "s"} omitted to fit the worker memory budget.)` : "";
+	const omittedNote =
+		omitted > 0 ? `\n(${omitted} newer observation${omitted === 1 ? " is" : "s are"} not listed in this batch; later passes handle them.)` : "";
 	return {
 		text: `CURRENT REFLECTIONS:
 ${selectedReflections.length > 0 ? selectedReflections.join("\n") : "(none yet)"}
@@ -149,13 +181,23 @@ export async function runDropper(options: RunDropperOptions): Promise<string[] |
 	const metrics = observationPoolMetrics(observations, targetTokens);
 	if (metrics.maxDropsAllowed <= 0) return undefined;
 
+	// Critical records and uncovered high records are never accepted, so they
+	// would only take up the batch and the model's reasoning.
+	const droppable = observations.filter(
+		(observation) =>
+			observation.relevance !== "critical" && (observation.relevance !== "high" || isCovered(observation.id, reflections)),
+	);
+	if (droppable.length === 0) return undefined;
 	const context = boundedContext(
 		reflections,
-		observations,
+		droppable,
 		resolveWorkerMemoryMaxTokens(runtime.config, resolved.model.contextWindow),
+		runtime.dropperBatchTokens ?? DROPPER_BATCH_MAX_TOKENS,
 	);
 	if (context.observations.length === 0) return undefined;
 	const allowed = new Map(context.observations.map((observation) => [observation.id, observation]));
+	// Protected records are not listed; their ids still get the protection reason.
+	const pool = new Map(observations.map((observation) => [observation.id, observation]));
 	const selected = new Set<string>();
 	// Run totals feed diagnostics; each tool result reports only its own call.
 	let runRejected = 0;
@@ -179,23 +221,28 @@ export async function runDropper(options: RunDropperOptions): Promise<string[] |
 			for (let index = 0; index < ids.length; index++) {
 				const id: unknown = ids[index];
 				const label = `#${index + 1}`;
-				if (typeof id !== "string" || !allowed.has(id)) {
+				const observation = typeof id === "string" ? pool.get(id) : undefined;
+				if (!observation) {
 					rejected++;
 					reasons.push(`${label}: not an id listed under CURRENT OBSERVATIONS`);
 					continue;
 				}
-				const observation = allowed.get(id)!;
 				if (observation.relevance === "critical") {
 					rejected++;
 					reasons.push(`${label}: critical observations are never dropped`);
 					continue;
 				}
-				if (observation.relevance === "high" && !isCovered(id, reflections)) {
+				if (observation.relevance === "high" && !isCovered(observation.id, reflections)) {
 					rejected++;
 					reasons.push(`${label}: high observations need reflection coverage before they can be dropped`);
 					continue;
 				}
-				if (selected.has(id)) {
+				if (!allowed.has(observation.id)) {
+					rejected++;
+					reasons.push(`${label}: not an id listed under CURRENT OBSERVATIONS`);
+					continue;
+				}
+				if (selected.has(observation.id)) {
 					duplicates++;
 					continue;
 				}
@@ -204,7 +251,7 @@ export async function runDropper(options: RunDropperOptions): Promise<string[] |
 					reasons.push(`${label}: the hard maximum of ${metrics.maxDropsAllowed} drops is reached`);
 					continue;
 				}
-				selected.add(id);
+				selected.add(observation.id);
 				added++;
 			}
 			runRejected += rejected;
@@ -221,16 +268,6 @@ export async function runDropper(options: RunDropperOptions): Promise<string[] |
 			};
 		},
 	};
-
-	if (
-		!context.observations.some(
-			(observation) =>
-				observation.relevance !== "critical" &&
-				(observation.relevance !== "high" || isCovered(observation.id, reflections)),
-		)
-	) {
-		return undefined;
-	}
 
 	const rawUser = `${context.text}
 
@@ -258,6 +295,9 @@ Hard maximum drops this run: ${metrics.maxDropsAllowed}. The maximum is an upper
 	});
 	if (result.failed) {
 		runtime.debug.record("dropper", "partial_after_error", { turns: result.turns, error: result.errorMessage });
+	}
+	if (result.truncated && selected.size === 0) {
+		throw new Error("dropper reply hit its output token limit before proposing any drop");
 	}
 	const ids = Array.from(selected);
 	if (ids.length === 0) {

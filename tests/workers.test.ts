@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { completeSimple } from "@oh-my-pi/pi-ai";
 import type { Observation } from "../src/ledger/types";
 import { runDropper } from "../src/workers/dropper";
+import { isOutputLimitError } from "../src/workers/loop";
 import type { ResolvedWorkerModel } from "../src/workers/model";
 import { runObserver } from "../src/workers/observer";
 import { runReflector } from "../src/workers/reflector";
@@ -482,7 +483,54 @@ describe("dropper", () => {
 		expect(ids).toBeUndefined();
 		expect(prompt).toContain(oldest.id);
 		expect(prompt).not.toContain(newest.id);
-		expect(prompt).toContain("1 observation omitted");
+		expect(prompt).toContain("1 newer observation is not listed in this batch");
+	});
+
+	test("lists at most the session's batch of oldest observations, even when the memory budget allows more", async () => {
+		const { runtime } = makeHarness({ redactSecrets: false, workerMemoryMaxTokens: 100_000 });
+		runtime.dropperBatchTokens = 150;
+		const oldest = observation("aaaaaaaaaaaa", `${"a".repeat(400)}`);
+		const newest = observation("bbbbbbbbbbbb", `${"b".repeat(400)}`);
+		let prompt = "";
+		const complete = (async (_model: unknown, context: { messages: Array<{ content: unknown }> }) => {
+			const content = context.messages[0]?.content;
+			prompt = typeof content === "string" ? content : "";
+			return makeAssistant([text("keep")]);
+		}) as typeof completeSimple;
+		await runDropper({ runtime, resolved, reflections: [], observations: [oldest, newest], targetTokens: 1, signal: new AbortController().signal, complete });
+		expect(prompt).toContain(oldest.id);
+		expect(prompt).not.toContain(newest.id);
+	});
+
+	test("lists only observations it may drop: no critical and no uncovered high records", async () => {
+		const { runtime } = makeHarness({ redactSecrets: false });
+		const critical: Observation = { ...observation("aaaaaaaaaaaa", "User is the project owner."), relevance: "critical" };
+		const high: Observation = { ...observation("bbbbbbbbbbbb", "The deploy target is the staging cluster."), relevance: "high" };
+		const low: Observation = { ...observation("cccccccccccc", "User mentioned the office coffee machine."), relevance: "low" };
+		let prompt = "";
+		const complete = (async (_model: unknown, context: { messages: Array<{ content: unknown }> }) => {
+			const content = context.messages[0]?.content;
+			prompt = typeof content === "string" ? content : "";
+			return makeAssistant([text("keep")]);
+		}) as typeof completeSimple;
+		await runDropper({ runtime, resolved, reflections: [], observations: [critical, high, low], targetTokens: 1, signal: new AbortController().signal, complete });
+		expect(prompt).toContain(low.id);
+		expect(prompt).not.toContain(critical.id);
+		expect(prompt).not.toContain(high.id);
+	});
+
+	test("a reply truncated before any drop is an output-limit failure", async () => {
+		const { runtime } = makeHarness({ redactSecrets: false });
+		const error = await runDropper({
+			runtime,
+			resolved,
+			reflections: [],
+			observations: [observation("aaaaaaaaaaaa", "User mentioned the office coffee machine.")],
+			targetTokens: 1,
+			signal: new AbortController().signal,
+			complete: (async () => makeAssistant([text("")], "length")) as unknown as typeof completeSimple,
+		}).catch((caught: unknown) => caught);
+		expect(isOutputLimitError(error)).toBe(true);
 	});
 
 	test("skips an oversized oldest observation instead of hiding every later one", async () => {

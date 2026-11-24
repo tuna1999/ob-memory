@@ -5,6 +5,7 @@ import { foldLedger, latestCoverageId, observationTokens } from "../src/ledger/f
 import type { LedgerEntry, Observation } from "../src/ledger/types";
 import type { SessionRuntime } from "../src/runtime";
 import { isNothingNewReply } from "../src/workers/observer";
+import { DROPPER_BATCH_MAX_TOKENS } from "../src/workers/dropper";
 import { OBSERVER_SYSTEM } from "../src/workers/prompts";
 import {
 	OBSERVER_MAX_UNPRODUCTIVE_ATTEMPTS,
@@ -323,7 +324,7 @@ describe("incomplete dropper runs", () => {
 		return harness;
 	}
 
-	function workers(runtime: SessionRuntime, dropperFailure: () => "abort" | "error" | undefined) {
+	function workers(runtime: SessionRuntime, dropperFailure: () => "abort" | "error" | "cut" | undefined) {
 		const stages: Stage[] = [];
 		const complete = (async (_model: unknown, context: WorkerContext) => {
 			if (context.messages.length > 1) return makeAssistant([text("done")]);
@@ -342,6 +343,7 @@ describe("incomplete dropper runs", () => {
 					return makeAssistant([text("")], "aborted");
 				}
 				if (failure === "error") return makeAssistant([text("")], "error", "overloaded");
+				if (failure === "cut") return makeAssistant([text("")], "error", "an empty reply: cut at its length (raise max_tokens)");
 				return makeAssistant([makeToolCall("drop_observations", { ids: [hexId("a", 1), hexId("a", 2)] })], "toolUse");
 			}
 			return makeAssistant([text("Nothing new.")]);
@@ -366,12 +368,17 @@ describe("incomplete dropper runs", () => {
 		expect(second).toMatchObject({ reflected: 0, dropped: 2 });
 		expect(stages).toEqual(["reflector", "dropper", "dropper"]);
 		expect(observationTokens(foldLedger(entries).activeObservations)).toBeLessThan(before);
-		expect(runtime.dropPending).toBeUndefined();
+		// The pool is still over budget, so the productive run leaves the dropper pending.
+		expect(runtime.dropPending?.failures).toBe(0);
+		cancelScheduledConsolidation(runtime);
 
-		// A completed dropper run is not repeated over the unchanged pool.
+		// The next run drops nothing more, which ends the retries.
 		const third = await consolidate(runtime, "agent_end", { complete });
-		expect(third.skipped).toBe("below_threshold");
-		expect(stages).toHaveLength(3);
+		expect(third.dropped).toBe(0);
+		expect(runtime.dropPending).toBeUndefined();
+		const fourth = await consolidate(runtime, "agent_end", { complete });
+		expect(fourth.skipped).toBe("below_threshold");
+		expect(stages).toEqual(["reflector", "dropper", "dropper", "dropper"]);
 	});
 
 	test("a failed dropper is retried alone once the failure backoff expires", async () => {
@@ -385,6 +392,23 @@ describe("incomplete dropper runs", () => {
 
 		failure = undefined;
 		runtime.failureBackoffUntil = 0;
+		const second = await consolidate(runtime, "agent_end", { complete });
+		expect(second).toMatchObject({ reflected: 0, dropped: 2 });
+		expect(stages).toEqual(["reflector", "dropper", "dropper"]);
+	});
+
+	test("a dropper reply cut off by the output limit halves the batch, keeps the retry and does not fail the pass", async () => {
+		const { runtime } = overBudgetHarness();
+		active = runtime;
+		let failure: "cut" | undefined = "cut";
+		const { complete, stages } = workers(runtime, () => failure);
+		const first = await consolidate(runtime, "agent_end", { complete });
+		expect(first.skipped).toBeUndefined();
+		expect(runtime.isFailureBackoffActive()).toBe(false);
+		expect(runtime.dropperBatchTokens).toBe(DROPPER_BATCH_MAX_TOKENS / 2);
+		expect(runtime.dropPending?.failures).toBe(0);
+
+		failure = undefined;
 		const second = await consolidate(runtime, "agent_end", { complete });
 		expect(second).toMatchObject({ reflected: 0, dropped: 2 });
 		expect(stages).toEqual(["reflector", "dropper", "dropper"]);
