@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Observation pool
+
+- A long session could keep its observation pool far over budget for good: the reflector was shown only the newest observations that fit its budget, so the oldest high observations were never cited by a reflection, and the dropper may not drop a high observation no reflection covers. In a real session 312 such observations held the pool at 32k tokens against a 16k budget. The reflector now gives up to half of its observation budget to uncovered observations, oldest first; on that session the next pass reflected them and the dropper resumed dropping.
+- A reflection retired by the condenser still counts as coverage for the dropper, so retiring an obsolete reflection no longer makes the observations behind it undroppable.
+
 ## 0.5.0
 
 ### Reflection condenser

@@ -77,10 +77,37 @@ function selectNewestWithinBudget(lines: readonly string[], budget: number): { i
 }
 
 /**
+ * Select observations within `budget`: up to half of it goes to observations
+ * no reflection cites yet, oldest first, and the rest to the newest ones. A
+ * pool larger than the budget would otherwise never show its oldest uncovered
+ * records, and the dropper may not drop a high record no reflection covers.
+ */
+function selectObservations(
+	lines: readonly string[],
+	uncovered: readonly boolean[],
+	budget: number,
+): { indexes: number[]; tokens: number } {
+	const chosen = new Set<number>();
+	let tokens = 0;
+	const take = (order: Iterable<number>, limit: number) => {
+		for (const i of order) {
+			const cost = estimateTextTokens(lines[i]!) + 1;
+			if (chosen.has(i) || tokens + cost > limit) continue;
+			chosen.add(i);
+			tokens += cost;
+		}
+	};
+	take(lines.map((_, i) => i).filter((i) => uncovered[i]), Math.floor(budget / 2));
+	take(lines.map((_, i) => lines.length - 1 - i), budget);
+	return { indexes: Array.from(chosen).sort((a, b) => a - b), tokens };
+}
+
+/**
  * Fit reflections and observations into `maxTokens`. Observations are the
  * records the reflector cites, so they keep at least
  * WORKER_OBSERVATIONS_MIN_SHARE of the budget; reflections take the rest and
- * either side reclaims what the other leaves unused. Newest records win.
+ * either side reclaims what the other leaves unused. Newest records win, except
+ * that uncovered observations are shown oldest first (see selectObservations).
  */
 function boundedContext(
 	reflections: readonly Reflection[],
@@ -97,7 +124,8 @@ function boundedContext(
 	);
 	const reserved = selectNewestWithinBudget(observationLines, Math.floor(available * WORKER_OBSERVATIONS_MIN_SHARE));
 	const pickedReflections = selectNewestWithinBudget(reflectionLines, available - reserved.tokens);
-	const pickedObservations = selectNewestWithinBudget(observationLines, available - pickedReflections.tokens);
+	const uncovered = observations.map((observation) => coverageTier(observation.id, reflections) === "none");
+	const pickedObservations = selectObservations(observationLines, uncovered, available - pickedReflections.tokens);
 	const selectedReflections = pickedReflections.indexes.map((index) => reflectionLines[index]!);
 	const selectedObservations = pickedObservations.indexes.map((index) => observationLines[index]!);
 	const observationIds = new Set(pickedObservations.indexes.map((index) => observations[index]!.id));

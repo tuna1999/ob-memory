@@ -76,6 +76,12 @@ export interface RunDropperOptions {
 	runtime: SessionRuntime;
 	resolved: ResolvedWorkerModel;
 	reflections: readonly Reflection[];
+	/**
+	 * Reflections retired by the condenser: an observation they cited still
+	 * counts as covered, so retiring an obsolete reflection never makes the
+	 * observations behind it undroppable.
+	 */
+	retiredReflections?: readonly Reflection[];
 	observations: readonly Observation[];
 	targetTokens: number;
 	signal: AbortSignal;
@@ -178,6 +184,7 @@ ${selectedLines.length > 0 ? selectedLines.join("\n") : "(none yet)"}${omittedNo
 export async function runDropper(options: RunDropperOptions): Promise<string[] | undefined> {
 	const { runtime, resolved, reflections, observations, targetTokens, signal } = options;
 	if (observations.length === 0) return undefined;
+	const covering = options.retiredReflections ? [...reflections, ...options.retiredReflections] : reflections;
 	const metrics = observationPoolMetrics(observations, targetTokens);
 	if (metrics.maxDropsAllowed <= 0) return undefined;
 
@@ -185,7 +192,7 @@ export async function runDropper(options: RunDropperOptions): Promise<string[] |
 	// would only take up the batch and the model's reasoning.
 	const droppable = observations.filter(
 		(observation) =>
-			observation.relevance !== "critical" && (observation.relevance !== "high" || isCovered(observation.id, reflections)),
+			observation.relevance !== "critical" && (observation.relevance !== "high" || isCovered(observation.id, covering)),
 	);
 	if (droppable.length === 0) return undefined;
 	const context = boundedContext(
@@ -232,7 +239,7 @@ export async function runDropper(options: RunDropperOptions): Promise<string[] |
 					reasons.push(`${label}: critical observations are never dropped`);
 					continue;
 				}
-				if (observation.relevance === "high" && !isCovered(observation.id, reflections)) {
+				if (observation.relevance === "high" && !isCovered(observation.id, covering)) {
 					rejected++;
 					reasons.push(`${label}: high observations need reflection coverage before they can be dropped`);
 					continue;

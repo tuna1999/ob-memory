@@ -588,6 +588,9 @@ export async function consolidate(
 					runtime,
 					resolved: resolved.value,
 					reflections: currentFold.reflections,
+					retiredReflections: [...currentFold.reflectionsById.values()].filter((reflection) =>
+						currentFold.retiredReflectionIds.has(reflection.id),
+					),
 					observations: currentFold.activeObservations,
 					targetTokens: runtime.config.observationsPoolTargetTokens,
 					signal,

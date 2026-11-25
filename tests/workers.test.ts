@@ -417,6 +417,26 @@ describe("reflector", () => {
 		expect(records?.[0]?.supportingObservationIds).toEqual([obs.id]);
 	});
 
+	test("shows the oldest uncovered observation even when newer ones fill the budget", async () => {
+		const { runtime } = makeHarness({ redactSecrets: false, workerMemoryMaxTokens: 400 });
+		const oldest = observation("aaaaaaaaaaaa", "User chose Postgres for the ledger store after comparing SQLite.");
+		const covered = observation("bbbbbbbbbbbb", "The deploy target is the staging cluster.");
+		const newer = Array.from({ length: 30 }, (_, index) =>
+			observation(`c${index.toString(16).padStart(11, "0")}`, `Routine build status number ${index} for the nightly pipeline.`),
+		);
+		const reflection = { id: "dddddddddddd", content: "Deploys go to staging.", supportingObservationIds: [covered.id], tokenCount: 6 };
+		let prompt = "";
+		const complete = (async (_model: unknown, context: { messages: Array<{ content: unknown }> }) => {
+			const content = context.messages[0]?.content;
+			prompt = typeof content === "string" ? content : "";
+			return makeAssistant([text("done")]);
+		}) as typeof completeSimple;
+		await runReflector({ runtime, resolved, reflections: [reflection], observations: [oldest, covered, ...newer], signal: new AbortController().signal, complete });
+		expect(prompt).toContain(oldest.id);
+		expect(prompt).not.toContain(covered.id);
+		expect(prompt).toContain(newer.at(-1)!.id);
+	});
+
 	test("rejects support ids omitted from the bounded worker context", async () => {
 		const { runtime } = makeHarness({ redactSecrets: false, workerMemoryMaxTokens: 1 });
 		const obs = observation("aaaaaaaaaaaa");
@@ -517,6 +537,20 @@ describe("dropper", () => {
 		expect(prompt).toContain(low.id);
 		expect(prompt).not.toContain(critical.id);
 		expect(prompt).not.toContain(high.id);
+	});
+
+	test("a high observation cited only by a retired reflection may still be dropped", async () => {
+		const { runtime } = makeHarness({ redactSecrets: false });
+		const high: Observation = { ...observation("bbbbbbbbbbbb", "The deploy target is the staging cluster."), relevance: "high" };
+		const retired = { id: "cccccccccccc", content: "Deploys go to the staging cluster.", supportingObservationIds: [high.id], tokenCount: 8 };
+		let prompt = "";
+		const complete = (async (_model: unknown, context: { messages: Array<{ content: unknown }> }) => {
+			const content = context.messages[0]?.content;
+			prompt = typeof content === "string" ? content : "";
+			return makeAssistant([text("keep")]);
+		}) as typeof completeSimple;
+		await runDropper({ runtime, resolved, reflections: [], retiredReflections: [retired], observations: [high], targetTokens: 1, signal: new AbortController().signal, complete });
+		expect(prompt).toContain(high.id);
 	});
 
 	test("a reply truncated before any drop is an output-limit failure", async () => {
